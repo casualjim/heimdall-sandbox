@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+#MISE description="Build the application (Debug)"
+#MISE sources=["Cargo.toml", "crates/**/*.rs"]
+#MISE outputs=["target/debug/heimdall-sandbox"]
+
+echo "🚀 Starting debug build..."
+proj_dir=$(git rev-parse --show-toplevel)
+cd "$proj_dir" || exit 1
+
+cargo build --workspace --no-default-features

@@ -1,0 +1,42 @@
+{
+  "prompts": ["../.agents/commands"],
+  "subagents": {
+    "agentOverrides": {
+      "scout": {
+        "model": "openai-codex/gpt-5.3-codex",
+        "fallbackModels": ["openai-codex/gpt-5.4", "zai/glm-5-turbo"],
+        "thinking": "medium"
+      },
+      "planner": {
+        "model": "openai-codex/gpt-5.4",
+        "fallbackModels": ["zai/glm-5.1", "openai-codex/gpt-5.3-codex"],
+        "thinking": "xhigh"
+      },
+      "worker": {
+        "model": "zai/glm-5.1",
+        "fallbackModels": ["openai-codex/gpt-5.4", "openai-codex/gpt-5.3-codex"],
+        "thinking": "high"
+      },
+      "reviewer": {
+        "model": "zai/glm-5.1",
+        "fallbackModels": ["openai-codex/gpt-5.4", "zai/glm-5-turbo", "openai-codex/gpt-5.3-codex"],
+        "thinking": "high"
+      },
+      "context-builder": {
+        "model": "openai-codex/gpt-5.3-codex",
+        "fallbackModels": ["openai-codex/gpt-5.4", "zai/glm-5-turbo"],
+        "thinking": "medium"
+      },
+      "researcher": {
+        "model": "openai-codex/gpt-5.4",
+        "fallbackModels": ["zai/glm-5-turbo", "openai-codex/gpt-5.3-codex"],
+        "thinking": "high"
+      },
+      "delegate": {
+        "model": "openai-codex/gpt-5.4-mini",
+        "fallbackModels": ["zai/glm-5-turbo", "openai-codex/gpt-5.3-codex"],
+        "thinking": "high"
+      }
+    }
+  }
+}

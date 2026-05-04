@@ -1,0 +1,7 @@
+[package]
+edition.workspace = true
+name = "heimdall-process-hardening"
+version.workspace = true
+
+[dependencies]
+libc.workspace = true

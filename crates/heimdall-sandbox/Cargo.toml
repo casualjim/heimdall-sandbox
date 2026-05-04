@@ -1,0 +1,11 @@
+[package]
+edition.workspace = true
+name = "heimdall-sandbox"
+version.workspace = true
+
+[dependencies]
+clap.workspace = true
+heimdall-core.workspace = true
+heimdall-process-hardening.workspace = true
+serde.workspace = true
+serde_json.workspace = true

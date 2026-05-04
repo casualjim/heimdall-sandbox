@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+#MISE description="Run the tests for this project"
+#MISE sources=["Cargo.toml", "crates/**/*.rs"]
+#MISE depends=["build:debug"]
+
+cargo nextest run --workspace
+

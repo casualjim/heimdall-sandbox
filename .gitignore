@@ -1,0 +1,30 @@
+.env.*
+target
+node_modules
+mise.local.toml
+.mise/prepare-state.toml
+.claude/settings.local.json
+
+# Taskplane runtime artifacts (machine-specific, do not commit)
+.pi/*
+!.pi/agents/
+!.pi/prompts/
+!.pi/skills/
+!.pi/heimdall.json
+!.pi/settings.json
+!.pi/taskplane.json
+!.pi/taskplane-config.json
+.worktrees/
+.taskplane-tasks/
+
+# Pi project-local packages (if using pi install -l)
+.pi/npm/
+
+
+.venv
+uv.lock
+
+# Codebase wiki — compiled artifact, regenerated from source
+.codebase-wiki/
+.superpowers
+research_codex-sandbox-architecture_20260503.md

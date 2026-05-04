@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+#MISE description="Build the application (Release)"
+#MISE sources=["Cargo.toml", "crates/**/*.rs"]
+#MISE outputs=["target/release/heimdall-sandbox"]
+#MISE depends=["test"]
+
+echo "🚀 Starting release build..."
+proj_dir=$(git rev-parse --show-toplevel)
+cd "$proj_dir" || exit 1
+
+cargo build --release --workspace --no-default-features
+

@@ -1,0 +1,17 @@
+[settings]
+env_shell_expand = true
+
+[tools]
+"aqua:nextest-rs/nextest/cargo-nextest" = "latest"
+"cargo:cargo-hakari" = "latest"
+"cargo:cargo-release" = "latest"
+"cargo:samply" = "latest"
+hk = "latest"
+pkl = "latest"
+rust = "latest"
+sops = "latest"
+
+
+[env]
+_.file = ".env.json"
+REMARK_OSC52="1"
