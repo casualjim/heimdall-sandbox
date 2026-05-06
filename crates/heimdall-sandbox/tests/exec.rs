@@ -6,6 +6,139 @@ fn sandbox() -> Command {
     Command::new(env!("CARGO_BIN_EXE_heimdall-sandbox"))
 }
 
+fn bwrap_available() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            let candidate = dir.join("bwrap");
+            candidate.is_file()
+                && Command::new(candidate)
+                    .arg("--version")
+                    .status()
+                    .is_ok_and(|status| status.success())
+        })
+    })
+}
+
+fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after Unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("heimdall-{name}-{stamp}"));
+    std::fs::create_dir(&dir).expect("temp dir is created");
+    dir
+}
+
+fn run_policy(policy: &str) -> std::process::Output {
+    let mut child = sandbox()
+        .args(["exec", "--policy", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sandbox command starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(policy.as_bytes())
+        .expect("policy write succeeds");
+    child.wait_with_output().expect("sandbox command exits")
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_file_contents(path: &std::path::Path, expected: &str) -> String {
+    for _ in 0..40 {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && contents == expected
+        {
+            return contents;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+#[test]
+fn policy_schema_outputs_json_schema() {
+    let output = sandbox()
+        .args(["policy", "schema"])
+        .output()
+        .expect("schema command runs");
+
+    assert!(output.status.success());
+    let schema =
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("schema output is JSON");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(schema["additionalProperties"], false);
+    assert!(schema["properties"].get("filesystem").is_some());
+}
+
+#[test]
+fn policy_validate_accepts_file() {
+    let policy = unique_temp_dir("policy-validate").join("policy.json");
+    std::fs::write(&policy, r#"{"cwd":".","command":["true"]}"#).expect("policy file is written");
+
+    let output = sandbox()
+        .args(["policy", "validate"])
+        .arg(&policy)
+        .output()
+        .expect("validate command runs");
+    std::fs::remove_file(&policy).expect("policy file is removed");
+    std::fs::remove_dir(policy.parent().expect("policy has parent"))
+        .expect("policy dir is removed");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn policy_validate_accepts_stdin() {
+    let mut child = sandbox()
+        .args(["policy", "validate", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("validate command starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(br#"{"cwd":".","command":["true"]}"#)
+        .expect("policy write succeeds");
+
+    let output = child.wait_with_output().expect("validate command exits");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn policy_validate_rejects_invalid_policy() {
+    let mut child = sandbox()
+        .args(["policy", "validate", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("validate command starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(br#"{"cwd":".","command":["true"],"bogus":true}"#)
+        .expect("policy write succeeds");
+
+    let output = child.wait_with_output().expect("validate command exits");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown policy field: bogus"));
+}
+
 #[test]
 fn smoke_test_runs_simple_command() {
     let output = sandbox()
@@ -274,6 +407,544 @@ fn non_utf8_parent_environment_does_not_crash_sandbox() {
         .expect("sandbox command runs");
 
     assert_eq!(output.status.code(), Some(0));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_runs_isolated_command_when_filesystem_requested() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-smoke");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","printf isolated"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "isolated");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_keeps_unmatched_project_files_readonly() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-readonly");
+    std::fs::write(cwd.join("data.txt"), "old").expect("file is written");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","echo new > data.txt"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    let host_contents = std::fs::read_to_string(cwd.join("data.txt")).expect("file is readable");
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(!output.status.success());
+    assert_eq!(host_contents, "old");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_writable_patterns_allow_edits_and_creation() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-writable");
+    std::fs::create_dir(cwd.join("work")).expect("directory is created");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","echo edited > work/new.txt"],"filesystem":{{"writable":["work"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    let host_contents =
+        std::fs::read_to_string(cwd.join("work/new.txt")).expect("file is readable");
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(host_contents.trim(), "edited");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_broad_writable_cwd_allows_regular_writes_and_protects_control_paths() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-broad-writable");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","echo edited > regular.txt; touch .heimdall-deny || printf deny-blocked; touch .heimdall-write || printf write-blocked; touch .heimdall-local || true; mkdir .git || true; mkdir .agents || true; mkdir .pi || true"],"filesystem":{{"writable":["."]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    let host_contents = std::fs::read_to_string(cwd.join("regular.txt")).expect("file is readable");
+    let git_exists = cwd.join(".git").exists();
+    let agents_exists = cwd.join(".agents").exists();
+    let pi_exists = cwd.join(".pi").exists();
+    let deny_exists = cwd.join(".heimdall-deny").exists();
+    let write_exists = cwd.join(".heimdall-write").exists();
+    let heimdall_local_exists = cwd.join(".heimdall-local").exists();
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "deny-blockedwrite-blocked"
+    );
+    assert_eq!(host_contents.trim(), "edited");
+    assert!(!git_exists);
+    assert!(!agents_exists);
+    assert!(!pi_exists);
+    assert!(!deny_exists);
+    assert!(!write_exists);
+    assert!(!heimdall_local_exists);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_unavailable_fails_without_running_command() {
+    let cwd = unique_temp_dir("bwrap-missing");
+    let path = unique_temp_dir("bwrap-empty-path");
+    let marker = cwd.join("marker");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","touch marker"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let mut child = sandbox()
+        .env("PATH", &path)
+        .args(["exec", "--policy", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sandbox command starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(policy.as_bytes())
+        .expect("policy write succeeds");
+    let output = child.wait_with_output().expect("sandbox command exits");
+    let marker_exists = marker.exists();
+    std::fs::remove_dir_all(path).expect("path dir is removed");
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!marker_exists);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("bubblewrap executable not found"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_deny_masks_env_files_and_supports_negation() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-deny");
+    std::fs::write(cwd.join(".env"), "secret").expect("file is written");
+    std::fs::write(cwd.join(".env.example"), "example").expect("file is written");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","printf '%s:%s' \"$(cat .env)\" \"$(cat .env.example)\""],"filesystem":{{"deny":[".env*","!.env.example"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), ":example");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_reads_heimdall_fragments_from_cwd_after_json_patterns() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-fragments");
+    std::fs::write(cwd.join("secret.txt"), "secret").expect("file is written");
+    std::fs::write(cwd.join("write.txt"), "old").expect("file is written");
+    std::fs::write(cwd.join(".heimdall-deny"), "!secret.txt\n").expect("deny fragment is written");
+    std::fs::write(cwd.join(".heimdall-write"), "write.txt\n").expect("write fragment is written");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","cat secret.txt; echo new > write.txt"],"filesystem":{{"deny":["secret.txt"],"writable":[]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    let host_contents = std::fs::read_to_string(cwd.join("write.txt")).expect("file is readable");
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "secret");
+    assert_eq!(host_contents.trim(), "new");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_does_not_discover_pi_config() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-pi-config");
+    std::fs::create_dir(cwd.join(".pi")).expect("pi directory is created");
+    std::fs::write(cwd.join("secret.txt"), "secret").expect("file is written");
+    std::fs::write(
+        cwd.join(".pi").join("heimdall.json"),
+        r#"{"filesystem":{"deny":["secret.txt"]}}"#,
+    )
+    .expect("pi config is written");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","cat secret.txt"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "secret");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_does_not_walk_upward_for_fragments() {
+    if !bwrap_available() {
+        return;
+    }
+    let root = unique_temp_dir("bwrap-parent-fragment");
+    let cwd = root.join("subdir");
+    std::fs::create_dir(&cwd).expect("subdir is created");
+    std::fs::write(root.join(".heimdall-deny"), "secret.txt\n")
+        .expect("parent deny fragment is written");
+    std::fs::write(cwd.join("secret.txt"), "secret").expect("file is written");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","cat secret.txt"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(root).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "secret");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_virtual_files_are_readable_and_readonly() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-virtual");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","cat /tmp/heimdall-virtual; echo bad > /tmp/heimdall-virtual"],"filesystem":{{"virtual":{{"/tmp/heimdall-virtual":"virtual"}}}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "virtual");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_network_none_still_executes_in_isolated_path() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-network");
+    let policy = format!(
+        r#"{{"cwd":"{}","network":"none","command":["sh","-c","printf net-none"],"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "net-none");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_no_proc_policy_skips_proc_mount() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-no-proc");
+    let policy = format!(
+        r#"{{"cwd":"{}","proc":"none","command":["sh","-c","test ! -e /proc/self && printf no-proc"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "no-proc");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_synthetic_identity_files_do_not_leak_host_databases() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-identity");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","cat /etc/passwd; cat /etc/group"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("nobody:x:65534"));
+    assert!(stdout.contains("nogroup:x:65534"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_preserves_env_stdio_and_exit_status() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-runtime");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","printf '%s:%s' \"${{HEIMDALL_VISIBLE-unset}}\" \"${{HEIMDALL_SECRET-unset}}\"; printf err >&2; exit 37"],"filesystem":{{"deny":["missing"]}},"env":{{"deny":["HEIMDALL_SECRET"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let mut child = sandbox()
+        .env("HEIMDALL_VISIBLE", "visible")
+        .env("HEIMDALL_SECRET", "hidden")
+        .args(["exec", "--policy", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sandbox command starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(policy.as_bytes())
+        .expect("policy write succeeds");
+    let output = child.wait_with_output().expect("sandbox command exits");
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "visible:unset");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "err");
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_bubblewrap_signal_child(cwd: &std::path::Path, script: &str) -> std::process::Child {
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c",{}],"filesystem":{{"writable":["."]}},"stdio":"piped"}}"#,
+        cwd.display(),
+        serde_json::to_string(script).expect("script serializes")
+    );
+    let mut child = sandbox()
+        .args(["exec", "--policy", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("sandbox command starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(policy.as_bytes())
+        .expect("policy write succeeds");
+    child
+}
+
+#[cfg(target_os = "linux")]
+fn assert_bubblewrap_signal_is_forwarded(signal_name: &str, trap_name: &str, exit_code: i32) {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-signal");
+    let marker = cwd.join("marker");
+    let ready = cwd.join("ready");
+    let script = format!(
+        "trap 'printf forwarded > {}; exit {exit_code}' {trap_name}; touch {}; while true; do sleep 1; done",
+        marker.display(),
+        ready.display()
+    );
+    let mut child = spawn_bubblewrap_signal_child(&cwd, &script);
+
+    for _ in 0..40 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ready.exists(), "bubblewrap child did not signal readiness");
+    let kill_status = Command::new("kill")
+        .args([signal_name, &child.id().to_string()])
+        .status()
+        .expect("kill command runs");
+    assert!(kill_status.success());
+
+    let status = child.wait().expect("sandbox command exits");
+    let marker_contents = wait_for_file_contents(&marker, "forwarded");
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(status.code().is_some());
+    assert_eq!(marker_contents, "forwarded");
+}
+
+#[cfg(target_os = "linux")]
+fn assert_bubblewrap_signal_terminates_child(signal_name: &str) {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-signal-terminate");
+    let ready = cwd.join("ready");
+    let script = format!("touch {}; while true; do sleep 1; done", ready.display());
+    let mut child = spawn_bubblewrap_signal_child(&cwd, &script);
+
+    for _ in 0..40 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ready.exists(), "bubblewrap child did not signal readiness");
+    let kill_status = Command::new("kill")
+        .args([signal_name, &child.id().to_string()])
+        .status()
+        .expect("kill command runs");
+    assert!(kill_status.success());
+
+    let mut status = None;
+    for _ in 0..40 {
+        status = child.try_wait().expect("sandbox wait can be polled");
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(status.is_some(), "bubblewrap child did not terminate");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_child_dies_when_parent_crashes() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-parent-crash");
+    let ready = cwd.join("ready");
+    let marker = cwd.join("marker");
+    let script = format!(
+        "touch {}; sleep 2; touch {}",
+        ready.display(),
+        marker.display()
+    );
+    let mut child = spawn_bubblewrap_signal_child(&cwd, &script);
+
+    for _ in 0..40 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ready.exists(), "bubblewrap child did not signal readiness");
+
+    child.kill().expect("sandbox parent is killed");
+    let _ = child.wait().expect("sandbox parent exits");
+    std::thread::sleep(Duration::from_secs(3));
+    let marker_exists = marker.exists();
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(!marker_exists, "bubblewrap child survived parent crash");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sighup_is_forwarded_to_bubblewrap_process_group() {
+    assert_bubblewrap_signal_is_forwarded("-HUP", "HUP", 43);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigint_is_forwarded_to_bubblewrap_process_group() {
+    assert_bubblewrap_signal_is_forwarded("-INT", "INT", 44);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigquit_is_forwarded_to_bubblewrap_process_group() {
+    assert_bubblewrap_signal_terminates_child("-QUIT");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_is_forwarded_to_bubblewrap_process_group() {
+    assert_bubblewrap_signal_terminates_child("-TERM");
 }
 
 #[cfg(unix)]

@@ -4,6 +4,7 @@ name = "heimdall-core"
 version.workspace = true
 
 [dependencies]
+heimdall-linux-sandbox.workspace = true
 heimdall-process-hardening.workspace = true
 libc.workspace = true
 signal-hook.workspace = true

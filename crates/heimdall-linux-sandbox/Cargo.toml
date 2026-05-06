@@ -1,0 +1,9 @@
+[package]
+edition.workspace = true
+name = "heimdall-linux-sandbox"
+version.workspace = true
+
+[dependencies]
+ignore.workspace = true
+libc.workspace = true
+thiserror.workspace = true

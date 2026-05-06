@@ -10,7 +10,10 @@ mod request;
 mod signal;
 
 pub use error::{Error, SANDBOX_MISCONFIGURATION_EXIT_CODE};
-pub use executor::execute;
+pub use executor::Executor;
+pub use heimdall_linux_sandbox::{
+    FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
+};
 pub use request::{EnvPolicy, ExecRequest, StdioPolicy, validate_cwd};
 
 /// Result type for sandbox runtime operations.

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use heimdall_linux_sandbox::{FilesystemPolicy, NetworkMode, ProcMode};
+
 use crate::{Error, Result};
 
 /// Child stdio handling policy.
@@ -29,6 +31,9 @@ pub struct ExecRequest {
     denied_env: Vec<String>,
     env_policy: EnvPolicy,
     stdio_policy: StdioPolicy,
+    network_mode: NetworkMode,
+    filesystem_policy: FilesystemPolicy,
+    proc_mode: ProcMode,
 }
 
 impl ExecRequest {
@@ -57,6 +62,9 @@ impl ExecRequest {
             denied_env: Vec::new(),
             env_policy: EnvPolicy::Allowlist,
             stdio_policy: StdioPolicy::Inherit,
+            network_mode: NetworkMode::Host,
+            filesystem_policy: FilesystemPolicy::default(),
+            proc_mode: ProcMode::Default,
         })
     }
 
@@ -82,6 +90,33 @@ impl ExecRequest {
         self.denied_env = denied_env;
         self.env_policy = EnvPolicy::Allowlist;
         self
+    }
+
+    /// Return a copy of this request using the provided network mode.
+    #[must_use]
+    pub const fn with_network_mode(mut self, network_mode: NetworkMode) -> Self {
+        self.network_mode = network_mode;
+        self
+    }
+
+    /// Return a copy of this request using the provided filesystem policy.
+    #[must_use]
+    pub fn with_filesystem_policy(mut self, filesystem_policy: FilesystemPolicy) -> Self {
+        self.filesystem_policy = filesystem_policy;
+        self
+    }
+
+    /// Return a copy of this request using the provided proc mount policy.
+    #[must_use]
+    pub const fn with_proc_mode(mut self, proc_mode: ProcMode) -> Self {
+        self.proc_mode = proc_mode;
+        self
+    }
+
+    /// Return true when this request needs OS-level isolation.
+    #[must_use]
+    pub fn needs_isolation(&self) -> bool {
+        self.network_mode == NetworkMode::None || !self.filesystem_policy.is_empty()
     }
 
     /// Child working directory.
@@ -118,6 +153,24 @@ impl ExecRequest {
     #[must_use]
     pub const fn stdio_policy(&self) -> StdioPolicy {
         self.stdio_policy
+    }
+
+    /// Child network isolation policy.
+    #[must_use]
+    pub const fn network_mode(&self) -> NetworkMode {
+        self.network_mode
+    }
+
+    /// Filesystem sandbox policy.
+    #[must_use]
+    pub const fn filesystem_policy(&self) -> &FilesystemPolicy {
+        &self.filesystem_policy
+    }
+
+    /// Proc filesystem mount policy.
+    #[must_use]
+    pub const fn proc_mode(&self) -> ProcMode {
+        self.proc_mode
     }
 }
 

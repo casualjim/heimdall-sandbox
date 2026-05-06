@@ -23,6 +23,9 @@ pub enum Error {
     /// Waiting for the child process failed.
     #[error("failed to wait for child command: {0}")]
     Wait(#[source] std::io::Error),
+    /// Sandbox policy or platform setup is invalid.
+    #[error("sandbox misconfiguration: {0}")]
+    SandboxMisconfiguration(String),
 }
 
 impl Error {
@@ -50,6 +53,12 @@ impl Error {
         Self::Spawn(error)
     }
 
+    /// Construct a sandbox misconfiguration error.
+    #[must_use]
+    pub fn sandbox_misconfiguration(message: impl Into<String>) -> Self {
+        Self::SandboxMisconfiguration(message.into())
+    }
+
     /// Return the documented process exit code for this error.
     #[must_use]
     pub const fn exit_code(&self) -> i32 {
@@ -58,7 +67,8 @@ impl Error {
             | Self::InvalidCwd(_)
             | Self::Hardening(_)
             | Self::Spawn(_)
-            | Self::Wait(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
+            | Self::Wait(_)
+            | Self::SandboxMisconfiguration(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
         }
     }
 }

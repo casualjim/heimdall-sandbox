@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/heimdall-core",
+    "crates/heimdall-linux-sandbox",
     "crates/heimdall-process-hardening",
     "crates/heimdall-sandbox",
 ]
@@ -13,9 +14,13 @@ version = "0.1.0"
 [workspace.dependencies]
 clap = { version = "4.5.51", features = ["derive"] }
 heimdall-core = { path = "crates/heimdall-core" }
+heimdall-linux-sandbox = { path = "crates/heimdall-linux-sandbox" }
 heimdall-process-hardening = { path = "crates/heimdall-process-hardening" }
+ignore = "0.4.25"
 libc = "0.2.177"
+schemars = { version = "1.0", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+shellexpand = "3.1.1"
 signal-hook = "0.3.18"
 thiserror = "2.0.17"
