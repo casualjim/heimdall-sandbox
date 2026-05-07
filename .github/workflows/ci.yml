@@ -29,3 +29,25 @@ jobs:
 
       - name: Test
         run: mise run --force test
+
+  macos-test:
+    name: macOS CI
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install mise toolchain
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+
+      - name: Format and lint
+        run: mise format
+
+      - name: Test
+        run: mise run --force test
