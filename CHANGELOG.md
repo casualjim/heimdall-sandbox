@@ -1,8 +1,22 @@
+## [0.1.5] - 2026-05-07
+
+### 🚀 Features
+
+- Add macOS Seatbelt sandbox
+
+### ⚙️ Miscellaneous Tasks
+
+- Add project agent definitions
 ## [0.1.4] - 2026-05-07
 
 ### 📚 Documentation
 
 - Add README and MIT license
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.4 [ci skip]
+- Release version 0.1.4
 ## [0.1.3] - 2026-05-07
 
 ### ⚙️ Miscellaneous Tasks
