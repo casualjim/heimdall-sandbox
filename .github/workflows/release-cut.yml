@@ -145,6 +145,16 @@ jobs:
       - name: Run cargo-release
         run: cargo release ${{ steps.version.outputs.next_version }} --no-confirm --no-publish --no-push --execute
 
+      - name: Ensure release tag exists
+        env:
+          TAG_NAME: v${{ steps.version.outputs.next_version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${TAG_NAME}" >/dev/null; then
+            echo "Release tag ${TAG_NAME} already exists"
+            exit 0
+          fi
+          git tag -a "${TAG_NAME}" -m "chore: release version ${{ steps.version.outputs.next_version }}"
+
       - name: Push release commit with GITHUB_TOKEN
         run: |
           git config --unset-all http.https://github.com/.extraheader || true
