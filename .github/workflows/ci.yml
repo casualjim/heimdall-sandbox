@@ -21,6 +21,9 @@ jobs:
           install: true
           cache: true
 
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+
       - name: Format and lint
         run: mise format
 
