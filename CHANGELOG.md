@@ -1,8 +1,15 @@
+## [0.1.4] - 2026-05-07
+
+### 📚 Documentation
+
+- Add README and MIT license
 ## [0.1.3] - 2026-05-07
 
 ### ⚙️ Miscellaneous Tasks
 
 - Regenerate release workflow
+- Update changelog for v0.1.3 [ci skip]
+- Release version 0.1.3
 ## [0.1.2] - 2026-05-07
 
 ### ⚙️ Miscellaneous Tasks
