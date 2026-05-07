@@ -10,6 +10,8 @@ use crate::{Error, Result};
 
 #[cfg(target_os = "linux")]
 use heimdall_linux_sandbox::BubblewrapRequest;
+#[cfg(target_os = "macos")]
+use heimdall_macos_sandbox::SeatbeltRequest;
 
 /// Executes sandbox requests.
 pub struct Executor;
@@ -34,10 +36,14 @@ impl Executor {
             {
                 return self.execute_with_bubblewrap(request);
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            {
+                return self.execute_with_seatbelt(request);
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 return Err(Error::sandbox_misconfiguration(
-                    "filesystem/network isolation is only supported on Linux",
+                    "filesystem/network isolation is not supported on this platform",
                 ));
             }
         }
@@ -106,7 +112,7 @@ impl Executor {
         let mut child = ChildGuard::new(child);
 
         #[cfg(unix)]
-        forwarding.set_child(child.id());
+        forwarding.set_child(child.id())?;
 
         let status = child.wait()?;
         output_forwarding.join();
@@ -131,8 +137,7 @@ impl Executor {
             filesystem_policy: request.filesystem_policy(),
             proc_mode: request.proc_mode(),
         }
-        .into_plan()
-        .map_err(|error| Error::sandbox_misconfiguration(error.to_string()))?;
+        .into_plan()?;
         let mut command = plan.command();
         command
             .current_dir(request.cwd())
@@ -140,6 +145,27 @@ impl Executor {
             .envs(self.child_environment(request));
         Self::configure_stdio(&mut command, request.stdio_policy());
         install_bubblewrap_child_setup(&mut command);
+        self.execute_command_with_signal_target(command, request.stdio_policy(), true)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn execute_with_seatbelt(&self, request: &ExecRequest) -> Result<i32> {
+        validate_cwd(request.cwd())?;
+        let plan = SeatbeltRequest {
+            cwd: request.cwd(),
+            argv: request.argv(),
+            network_mode: request.network_mode(),
+            filesystem_policy: request.filesystem_policy(),
+            proc_mode: request.proc_mode(),
+        }
+        .into_plan()?;
+        let mut command = plan.command();
+        command
+            .current_dir(request.cwd())
+            .env_clear()
+            .envs(self.child_environment(request));
+        Self::configure_stdio(&mut command, request.stdio_policy());
+        install_seatbelt_child_setup(&mut command);
         self.execute_command_with_signal_target(command, request.stdio_policy(), true)
     }
 
@@ -229,6 +255,23 @@ fn install_child_setup(
                 std::io::Error::other("child hardening callback was already consumed")
             })?;
             hardener()
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_seatbelt_child_setup(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the closure only calls libc/setup routines intended to run after fork and before
+    // exec, and propagates `std::io::Error` values directly to `Command::spawn`.
+    unsafe {
+        command.pre_exec(move || {
+            // SAFETY: `setpgid(0, 0)` places the child in a fresh process group before exec.
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            heimdall_process_hardening::apply_child_hardening()
         });
     }
 }

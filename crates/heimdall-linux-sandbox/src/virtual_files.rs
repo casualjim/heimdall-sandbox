@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::policy::{FilesystemPolicy, MaterializedFilesystemPolicy, broadly_grants_cwd};
+use crate::policy::{FilesystemPolicy, broadly_grants_cwd};
 use crate::{Error, Result};
+use heimdall_sandbox_policy::MaterializedFilesystemPolicy;
 
 const SYNTHETIC_PASSWD: &str = "nobody:x:65534:65534:Nobody:/nonexistent:/usr/sbin/nologin\n";
 const SYNTHETIC_GROUP: &str = "nogroup:x:65534:\n";
@@ -97,20 +101,7 @@ impl VirtualDataFiles {
             .iter()
             .enumerate()
             .map(|(index, (sandbox_path, content))| {
-                let name = CString::new(format!("heimdall-virtual-{index}")).map_err(|error| {
-                    Error::sandbox_misconfiguration(format!("invalid virtual file name: {error}"))
-                })?;
-                // SAFETY: `name` is a valid nul-terminated C string and flags are zero so the fd
-                // is inherited by the bubblewrap child for `--ro-bind-data`.
-                let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
-                if fd < 0 {
-                    return Err(Error::sandbox_misconfiguration(format!(
-                        "failed to create virtual file data fd: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                // SAFETY: `fd` is uniquely owned after successful `memfd_create`.
-                let mut file = unsafe { File::from_raw_fd(fd) };
+                let mut file = create_virtual_file_data(index)?;
                 file.write_all(content.as_bytes()).map_err(|error| {
                     Error::sandbox_misconfiguration(format!(
                         "failed to write virtual file: {error}"
@@ -133,6 +124,44 @@ impl VirtualDataFiles {
     fn as_slice(&self) -> &[VirtualDataFile] {
         &self.files
     }
+}
+
+#[cfg(target_os = "linux")]
+fn create_virtual_file_data(index: usize) -> Result<File> {
+    let name = CString::new(format!("heimdall-virtual-{index}")).map_err(|error| {
+        Error::sandbox_misconfiguration(format!("invalid virtual file name: {error}"))
+    })?;
+    // SAFETY: `name` is a valid nul-terminated C string and flags are zero so the fd
+    // is inherited by the bubblewrap child for `--ro-bind-data`.
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+    if fd < 0 {
+        return Err(Error::sandbox_misconfiguration(format!(
+            "failed to create virtual file data fd: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: `fd` is uniquely owned after successful `memfd_create`.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_virtual_file_data(index: usize) -> Result<File> {
+    let path = std::env::temp_dir().join(format!(
+        "heimdall-virtual-data-{index}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Error::sandbox_misconfiguration(format!(
+                "system clock error: {error}"
+            )))?
+            .as_nanos()
+    ));
+    let file = File::create(&path).map_err(|error| {
+        Error::sandbox_misconfiguration(format!("failed to create virtual file data: {error}"))
+    })?;
+    std::fs::remove_file(&path).map_err(|error| {
+        Error::sandbox_misconfiguration(format!("failed to unlink virtual file data: {error}"))
+    })?;
+    Ok(file)
 }
 
 struct VirtualScratchDir {

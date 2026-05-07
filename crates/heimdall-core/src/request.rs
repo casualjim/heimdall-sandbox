@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use heimdall_linux_sandbox::{FilesystemPolicy, NetworkMode, ProcMode};
+use heimdall_sandbox_policy::{
+    FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
+};
 
 use crate::{Error, Result};
 
@@ -100,10 +102,14 @@ impl ExecRequest {
     }
 
     /// Return a copy of this request using the provided filesystem policy.
-    #[must_use]
-    pub fn with_filesystem_policy(mut self, filesystem_policy: FilesystemPolicy) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when filesystem policy validation fails.
+    pub fn with_filesystem_policy(mut self, filesystem_policy: FilesystemPolicy) -> Result<Self> {
+        validate_filesystem_policy(&filesystem_policy)?;
         self.filesystem_policy = filesystem_policy;
-        self
+        Ok(self)
     }
 
     /// Return a copy of this request using the provided proc mount policy.
@@ -189,6 +195,8 @@ pub fn validate_cwd(cwd: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -238,6 +246,27 @@ mod tests {
             Vec::<String>::new(),
         )
         .expect_err("invalid cwd is rejected");
+
+        assert_eq!(error.exit_code(), crate::SANDBOX_MISCONFIGURATION_EXIT_CODE);
+    }
+
+    #[test]
+    fn request_rejects_invalid_filesystem_policy() {
+        let request = ExecRequest::new(
+            std::env::current_dir().expect("current dir exists"),
+            vec!["true".into()],
+            Vec::<String>::new(),
+        )
+        .expect("valid request is accepted");
+        let filesystem_policy = FilesystemPolicy::new(
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::from([(PathBuf::from("etc/passwd"), "content".to_string())]),
+        );
+
+        let error = request
+            .with_filesystem_policy(filesystem_policy)
+            .expect_err("relative virtual path is rejected");
 
         assert_eq!(error.exit_code(), crate::SANDBOX_MISCONFIGURATION_EXIT_CODE);
     }

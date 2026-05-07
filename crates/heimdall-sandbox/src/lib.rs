@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use heimdall_core::{
     EnvPolicy, ExecRequest, Executor, FilesystemPolicy, NetworkMode, ProcMode,
-    SANDBOX_MISCONFIGURATION_EXIT_CODE, StdioPolicy, validate_filesystem_policy,
+    SANDBOX_MISCONFIGURATION_EXIT_CODE, StdioPolicy,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -346,8 +346,8 @@ fn policy_document_request(policy: PolicyDocument) -> std::result::Result<ExecRe
                 .with_stdio_policy(stdio.unwrap_or(CliStdioPolicy::Inherit).into())
                 .with_network_mode(network_mode)
                 .with_proc_mode(proc_mode)
-                .with_filesystem_policy(filesystem_policy)
         })
+        .and_then(|request| request.with_filesystem_policy(filesystem_policy))
         .map_err(|error| error.to_string())
 }
 
@@ -386,13 +386,11 @@ fn filesystem_policy(
     let Some(filesystem) = filesystem else {
         return Ok(FilesystemPolicy::default());
     };
-    let policy = FilesystemPolicy::new(
+    Ok(FilesystemPolicy::new(
         filesystem.deny.clone().unwrap_or_default(),
         filesystem.writable.clone().unwrap_or_default(),
         filesystem.virtual_files.clone().unwrap_or_default(),
-    );
-    validate_filesystem_policy(&policy).map_err(|error| error.to_string())?;
-    Ok(policy)
+    ))
 }
 
 /// Run the sandbox CLI and return the process exit code.

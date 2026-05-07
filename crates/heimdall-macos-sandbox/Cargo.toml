@@ -1,6 +1,6 @@
 [package]
 edition.workspace = true
-name = "heimdall-linux-sandbox"
+name = "heimdall-macos-sandbox"
 version.workspace = true
 
 [dependencies]

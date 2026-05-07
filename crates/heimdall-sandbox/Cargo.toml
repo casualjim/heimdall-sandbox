@@ -1,5 +1,5 @@
 [package]
-description = "Linux-only process sandbox runtime for Heimdall."
+description = "Process sandbox runtime for Heimdall."
 edition.workspace = true
 homepage = "https://github.com/casualjim/heimdall"
 license = "MIT"

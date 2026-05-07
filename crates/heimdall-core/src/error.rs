@@ -23,6 +23,17 @@ pub enum Error {
     /// Waiting for the child process failed.
     #[error("failed to wait for child command: {0}")]
     Wait(#[source] std::io::Error),
+    /// Shared sandbox policy is invalid.
+    #[error(transparent)]
+    SandboxPolicy(#[from] heimdall_sandbox_policy::Error),
+    /// Linux sandbox planning failed.
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    LinuxSandbox(#[from] heimdall_linux_sandbox::Error),
+    /// macOS sandbox planning failed.
+    #[cfg(target_os = "macos")]
+    #[error(transparent)]
+    MacosSandbox(#[from] heimdall_macos_sandbox::Error),
     /// Sandbox policy or platform setup is invalid.
     #[error("sandbox misconfiguration: {0}")]
     SandboxMisconfiguration(String),
@@ -68,7 +79,12 @@ impl Error {
             | Self::Hardening(_)
             | Self::Spawn(_)
             | Self::Wait(_)
+            | Self::SandboxPolicy(_)
             | Self::SandboxMisconfiguration(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
+            #[cfg(target_os = "linux")]
+            Self::LinuxSandbox(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
+            #[cfg(target_os = "macos")]
+            Self::MacosSandbox(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
         }
     }
 }

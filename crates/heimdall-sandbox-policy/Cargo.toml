@@ -1,9 +1,8 @@
 [package]
 edition.workspace = true
-name = "heimdall-linux-sandbox"
+name = "heimdall-sandbox-policy"
 version.workspace = true
 
 [dependencies]
-heimdall-sandbox-policy.workspace = true
-libc.workspace = true
+ignore.workspace = true
 thiserror.workspace = true

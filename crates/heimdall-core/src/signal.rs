@@ -1,15 +1,22 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::{Error, Result};
 
 pub(crate) struct SignalForwarding {
-    child_pid: Arc<AtomicI32>,
+    state: Arc<Mutex<SignalState>>,
     target_process_group: bool,
-    pending_signal: Arc<AtomicI32>,
     handle: signal_hook::iterator::Handle,
     thread: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct SignalState {
+    child_pid: Option<i32>,
+    pending_signals: Vec<i32>,
+    // Asynchronous forwarding happens after the child is already running; store failures only as
+    // non-fatal diagnostics because there is no safe way to return them to the waiting caller.
+    last_forward_error: Option<std::io::ErrorKind>,
 }
 
 impl SignalForwarding {
@@ -30,41 +37,72 @@ impl SignalForwarding {
         ])
         .map_err(Error::Hardening)?;
         let handle = signals.handle();
-        let child_pid = Arc::new(AtomicI32::new(0));
-        let pending_signal = Arc::new(AtomicI32::new(0));
-        let thread_child_pid = Arc::clone(&child_pid);
-        let thread_pending_signal = Arc::clone(&pending_signal);
+        let state = Arc::new(Mutex::new(SignalState::default()));
+        let thread_state = Arc::clone(&state);
         let thread = thread::spawn(move || {
             for signal in signals.forever() {
-                let pid = thread_child_pid.load(Ordering::SeqCst);
-                if pid > 0 {
-                    forward_signal(pid, signal, target_process_group);
-                } else {
-                    thread_pending_signal.store(signal, Ordering::SeqCst);
+                let child_pid = {
+                    let mut state = thread_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(pid) = state.child_pid {
+                        pid
+                    } else {
+                        state.pending_signals.push(signal);
+                        continue;
+                    }
+                };
+                if let Err(error) = forward_signal(child_pid, signal, target_process_group) {
+                    let mut state = thread_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.last_forward_error = Some(error.kind());
                 }
             }
         });
 
         Ok(Self {
-            child_pid,
+            state,
             target_process_group,
-            pending_signal,
             handle,
             thread: Some(thread),
         })
     }
 
-    pub(crate) fn set_child(&self, child_id: u32) {
+    pub(crate) fn set_child(&self, child_id: u32) -> Result<()> {
         let pid = child_id as i32;
-        self.child_pid.store(pid, Ordering::SeqCst);
-        let pending = self.pending_signal.swap(0, Ordering::SeqCst);
-        if pending > 0 {
-            forward_signal(pid, pending, self.target_process_group);
+        let pending = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.child_pid = Some(pid);
+            std::mem::take(&mut state.pending_signals)
+        };
+        for signal in pending {
+            forward_signal(pid, signal, self.target_process_group).map_err(Error::Hardening)?;
         }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn pending_signal_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pending_signals
+            .len()
     }
 
     fn stop(&mut self) {
-        self.child_pid.store(0, Ordering::SeqCst);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.child_pid = None;
+            let _last_forward_error = state.last_forward_error.take();
+        }
         self.handle.close();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -72,12 +110,15 @@ impl SignalForwarding {
     }
 }
 
-fn forward_signal(pid: i32, signal: i32, target_process_group: bool) {
+fn forward_signal(pid: i32, signal: i32, target_process_group: bool) -> std::io::Result<()> {
     let target = if target_process_group { -pid } else { pid };
     // SAFETY: `target` is captured from the successfully spawned child process and `signal`
     // comes from the signal-hook iterator for installed signals.
-    unsafe {
-        libc::kill(target, signal);
+    let result = unsafe { libc::kill(target, signal) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -131,13 +172,15 @@ mod tests {
             libc::kill(libc::getpid(), libc::SIGTERM);
         }
         for _ in 0..40 {
-            if forwarding.pending_signal.load(Ordering::SeqCst) == libc::SIGTERM {
+            if forwarding.pending_signal_count() > 0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        forwarding.set_child(child.id());
+        forwarding
+            .set_child(child.id())
+            .expect("child signal target registers");
         let status = child.wait().expect("child exits");
         drop(forwarding);
         let marker_contents = std::fs::read_to_string(&marker).expect("marker is written");

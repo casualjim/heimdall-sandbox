@@ -29,3 +29,9 @@ impl Error {
         Self::SandboxMisconfiguration(message.into())
     }
 }
+
+impl From<heimdall_sandbox_policy::Error> for Error {
+    fn from(error: heimdall_sandbox_policy::Error) -> Self {
+        Self::sandbox_misconfiguration(error.to_string())
+    }
+}
