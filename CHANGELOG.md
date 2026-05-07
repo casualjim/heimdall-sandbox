@@ -1,3 +1,12 @@
+## [0.1.6] - 2026-05-07
+
+### 🚀 Features
+
+- *(release)* Add macOS CI and Apple Silicon artifacts
+
+### 📚 Documentation
+
+- Add Linux eBPF egress solution analysis
 ## [0.1.5] - 2026-05-07
 
 ### 🚀 Features
@@ -7,6 +16,8 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Add project agent definitions
+- Update changelog for v0.1.5 [ci skip]
+- Release version 0.1.5
 ## [0.1.4] - 2026-05-07
 
 ### 📚 Documentation
