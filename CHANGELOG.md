@@ -1,3 +1,8 @@
+## [0.1.7] - 2026-05-07
+
+### 📚 Documentation
+
+- Update README for macOS Seatbelt, fragment files, and new install options
 ## [0.1.6] - 2026-05-07
 
 ### 🚀 Features
@@ -7,6 +12,11 @@
 ### 📚 Documentation
 
 - Add Linux eBPF egress solution analysis
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.6 [ci skip]
+- Release version 0.1.6
 ## [0.1.5] - 2026-05-07
 
 ### 🚀 Features
