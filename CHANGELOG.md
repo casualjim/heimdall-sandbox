@@ -1,4 +1,6 @@
-# Changelog
+## [0.1.1] - 2026-05-07
 
-All notable changes to this project will be documented in this file.
+### ⚙️ Miscellaneous Tasks
 
+- Add release automation
+- Install rust formatting components
