@@ -1,6 +1,10 @@
 [package]
+description = "Linux-only process sandbox runtime for Heimdall."
 edition.workspace = true
+homepage = "https://github.com/casualjim/heimdall"
+license = "MIT"
 name = "heimdall-sandbox"
+repository = "https://github.com/casualjim/heimdall"
 version.workspace = true
 
 [dependencies]

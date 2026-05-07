@@ -153,8 +153,29 @@ pub async fn create(raw_email: String) -> Result<User, DomainError> {
 - **Do** ensure interface crates act as thin wrappers that normalize data and call `crumbs`.
 - **When adding a feature**: Implement the logic and types in `crumbs` first, then update the relevant interface crate to expose it.
 
+## Commit Messages
+
+- Use Conventional Commits for all commit messages in this repository.
+- Format: `<type>(<optional-scope>): <description>`.
+- Prefer these types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, and `revert`.
+- Use `!` for breaking changes, e.g. `feat!: remove legacy policy format`.
+- Add release bump tokens in the commit or PR text when needed: `bump:major`, `bump:minor`, or `bump:patch`.
+- This repository overrides any parent/shared guidance that prohibits Conventional Commit prefixes.
+
+Good examples:
+- `feat: add Linux release workflow`
+- `fix: reject relative virtual filesystem paths`
+- `ci: add GitHub Actions release pipeline`
+- `chore: update changelog for v0.1.1`
+
+Bad examples:
+- `Add release workflow`
+- `Fix stuff`
+- `WIP`
+
 ## Before Committing Checklist
 
+- [ ] Commit messages follow Conventional Commits.
 - [ ] `mise format` passes
 - [ ] `mise run --force test` passes
 - [ ] **No `allow` attributes**: All lint warnings fixed, not suppressed

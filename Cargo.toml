@@ -11,6 +11,14 @@ resolver = "3"
 edition = "2024"
 version = "0.1.0"
 
+[workspace.metadata.release]
+allow-branch = ["main"]
+pre-release-commit-message = "chore: release version {{version}}"
+publish = false
+sign-commit = false
+sign-tag = false
+tag-message = "chore: release version {{version}}"
+
 [workspace.dependencies]
 clap = { version = "4.5.51", features = ["derive"] }
 heimdall-core = { path = "crates/heimdall-core" }
