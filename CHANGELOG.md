@@ -1,8 +1,20 @@
+## [0.1.9] - 2026-05-08
+
+### 🐛 Bug Fixes
+
+- Use Node tooling for npm package assembly
+- Handle downloaded cargo-dist artifact layout
+- Retry crates.io publish attempts
 ## [0.1.8] - 2026-05-08
 
 ### 🚀 Features
 
 - Add registry publishing automation
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.8 [ci skip]
+- Release version 0.1.8
 ## [0.1.7] - 2026-05-07
 
 ### 📚 Documentation
