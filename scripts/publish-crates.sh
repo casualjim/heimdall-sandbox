@@ -36,43 +36,20 @@ CRATES=(
   "heimdall-sandbox"
 )
 
-crate_version_exists() {
-  local crate="$1"
-  local version="$2"
-  local status
-  status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-    "https://crates.io/api/v1/crates/${crate}/${version}")
-  case "${status}" in
-    200) return 0 ;;
-    404) return 1 ;;
-    *) echo "crates.io version lookup failed for ${crate} ${version}: HTTP ${status}" >&2; return 2 ;;
-  esac
-}
-
-wait_for_crate_version() {
-  local crate="$1"
-  local version="$2"
-  for _ in $(seq 1 30); do
-    if crate_version_exists "${crate}" "${version}"; then
-      return 0
-    fi
-    sleep 10
-  done
-  echo "${crate} ${version} did not appear in crates.io index after publishing" >&2
-  return 1
-}
-
 publish_crate() {
   local crate="$1"
   local attempt
+  local output
   for attempt in $(seq 1 "${PUBLISH_MAX_ATTEMPTS}"); do
     echo "Publishing ${crate} ${VERSION} to crates.io (attempt ${attempt}/${PUBLISH_MAX_ATTEMPTS})"
-    if cargo publish --locked --package "${crate}" --token "${CARGO_REGISTRY_TOKEN-}"; then
+    if output=$(cargo publish --locked --package "${crate}" --token "${CARGO_REGISTRY_TOKEN-}" 2>&1); then
+      printf '%s\n' "${output}"
       return 0
     fi
 
-    if crate_version_exists "${crate}" "${VERSION}"; then
-      echo "${crate} ${VERSION} appeared on crates.io after publish failure; continuing"
+    printf '%s\n' "${output}" >&2
+    if grep -Eiq 'already (uploaded|exists)|crate version .* is already uploaded|version .* already exists' <<<"${output}"; then
+      echo "${crate} ${VERSION} already exists on crates.io; skipping"
       return 0
     fi
 
@@ -87,12 +64,6 @@ publish_crate() {
 }
 
 for crate in "${CRATES[@]}"; do
-  if crate_version_exists "${crate}" "${VERSION}"; then
-    echo "${crate} ${VERSION} already exists on crates.io; skipping"
-    continue
-  fi
-
   publish_crate "${crate}"
-  wait_for_crate_version "${crate}" "${VERSION}"
   sleep "${PUBLISH_SUCCESS_DELAY_SECONDS}"
 done
