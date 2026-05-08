@@ -23,6 +23,10 @@ if [[ "${VERSION}" != "${WORKSPACE_VERSION}" ]]; then
   exit 1
 fi
 
+PUBLISH_MAX_ATTEMPTS="${PUBLISH_MAX_ATTEMPTS:-5}"
+PUBLISH_RETRY_DELAY_SECONDS="${PUBLISH_RETRY_DELAY_SECONDS:-10}"
+PUBLISH_SUCCESS_DELAY_SECONDS="${PUBLISH_SUCCESS_DELAY_SECONDS:-10}"
+
 CRATES=(
   "heimdall-process-hardening"
   "heimdall-sandbox-policy"
@@ -58,13 +62,37 @@ wait_for_crate_version() {
   return 1
 }
 
+publish_crate() {
+  local crate="$1"
+  local attempt
+  for attempt in $(seq 1 "${PUBLISH_MAX_ATTEMPTS}"); do
+    echo "Publishing ${crate} ${VERSION} to crates.io (attempt ${attempt}/${PUBLISH_MAX_ATTEMPTS})"
+    if cargo publish --locked --package "${crate}" --token "${CARGO_REGISTRY_TOKEN-}"; then
+      return 0
+    fi
+
+    if crate_version_exists "${crate}" "${VERSION}"; then
+      echo "${crate} ${VERSION} appeared on crates.io after publish failure; continuing"
+      return 0
+    fi
+
+    if [[ "${attempt}" == "${PUBLISH_MAX_ATTEMPTS}" ]]; then
+      echo "failed to publish ${crate} ${VERSION} after ${PUBLISH_MAX_ATTEMPTS} attempts" >&2
+      return 1
+    fi
+
+    echo "publish failed for ${crate} ${VERSION}; retrying in ${PUBLISH_RETRY_DELAY_SECONDS}s" >&2
+    sleep "${PUBLISH_RETRY_DELAY_SECONDS}"
+  done
+}
+
 for crate in "${CRATES[@]}"; do
   if crate_version_exists "${crate}" "${VERSION}"; then
     echo "${crate} ${VERSION} already exists on crates.io; skipping"
     continue
   fi
 
-  echo "Publishing ${crate} ${VERSION} to crates.io"
-  cargo publish --locked --package "${crate}" --token "${CARGO_REGISTRY_TOKEN-}"
+  publish_crate "${crate}"
   wait_for_crate_version "${crate}" "${VERSION}"
+  sleep "${PUBLISH_SUCCESS_DELAY_SECONDS}"
 done
