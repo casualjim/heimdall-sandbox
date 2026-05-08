@@ -32,4 +32,4 @@ Platform npm packages publish first. The main package publishes last and depends
 
 Use `scripts/validate-cargo-packages.sh` to validate package file selection and required Cargo metadata for every publishable crate before a first registry release. Full `cargo publish --dry-run` can only verify dependent Heimdall crates after their internal dependencies already exist in the crates.io index; the release publish script handles first-release ordering and waits for each dependency version to become visible before publishing the next crate.
 
-Use `python3 scripts/prepare-npm-packages.py --dry-run-placeholders --pack-dry-run` to validate npm metadata, optional dependency wiring, CLI shim packaging, and platform package file layout without cargo-dist release artifacts.
+Use `node scripts/prepare-npm-packages.ts --dry-run-placeholders --pack-dry-run` to validate npm metadata, optional dependency wiring, CLI shim packaging, and platform package file layout without cargo-dist release artifacts. The npm package assembly script uses Node 24's built-in TypeScript support and has no third-party dependencies.

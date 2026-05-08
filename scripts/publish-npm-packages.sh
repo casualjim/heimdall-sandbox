@@ -17,7 +17,7 @@ fi
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-target/distrib}"
 OUT_DIR="${OUT_DIR:-target/npm-packages}"
 
-python3 scripts/prepare-npm-packages.py --version "${VERSION}" --artifacts-dir "${ARTIFACTS_DIR}" --out-dir "${OUT_DIR}" --pack-dry-run
+node scripts/prepare-npm-packages.ts --version "${VERSION}" --artifacts-dir "${ARTIFACTS_DIR}" --out-dir "${OUT_DIR}" --pack-dry-run
 
 PACKAGES=(
   "heimdall-sandbox-linux-x64:@casualjim/heimdall-sandbox-linux-x64"
