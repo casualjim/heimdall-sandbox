@@ -1,8 +1,18 @@
+## [0.1.8] - 2026-05-08
+
+### 🚀 Features
+
+- Add registry publishing automation
 ## [0.1.7] - 2026-05-07
 
 ### 📚 Documentation
 
 - Update README for macOS Seatbelt, fragment files, and new install options
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.7 [ci skip]
+- Release version 0.1.7
 ## [0.1.6] - 2026-05-07
 
 ### 🚀 Features
