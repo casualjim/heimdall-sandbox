@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import process from 'node:process';
 
@@ -120,24 +121,40 @@ function chmodExecutable(path: string, mode = statSync(path).mode): void {
 }
 
 function findArchive(artifactsDir: string, target: string): string {
-  const prefix = `${BINARY}-${target}.tar.`;
-  const matches = readdirSync(artifactsDir)
-    .filter((entry) => entry.startsWith(prefix))
-    .sort();
+  const archiveName = `${BINARY}-${target}.tar.xz`;
+  const matches = findFiles(artifactsDir, (path) => basename(path) === archiveName).sort();
   if (matches.length === 0) {
-    throw new Error(`missing cargo-dist archive for ${target} in ${artifactsDir}`);
+    throw new Error(`missing cargo-dist archive ${archiveName} under ${artifactsDir}`);
   }
-  return join(artifactsDir, matches[0]);
+  return matches[0];
+}
+
+function findFiles(root: string, predicate: (path: string) => boolean): string[] {
+  const matches: string[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      matches.push(...findFiles(path, predicate));
+    } else if (entry.isFile() && predicate(path)) {
+      matches.push(path);
+    }
+  }
+  return matches;
 }
 
 function extractBinary(archive: string, destination: string): void {
-  const list = spawnChecked('tar', ['-tf', archive]).stdout.trim().split('\n');
-  const member = list.find((entry) => basename(entry) === BINARY);
-  if (!member) {
-    throw new Error(`archive ${archive} does not contain ${BINARY}`);
+  const tmp = mkdtempSync(join(tmpdir(), 'heimdall-npm-'));
+  try {
+    spawnChecked('tar', ['-xf', archive, '-C', tmp]);
+    const candidates = findFiles(tmp, (path) => basename(path) === BINARY);
+    if (candidates.length === 0) {
+      throw new Error(`archive ${archive} does not contain ${BINARY}`);
+    }
+    copyFileSync(candidates[0], destination);
+    chmodExecutable(destination);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
-  const binary = spawnChecked('tar', ['-xOf', archive, member], 'buffer').stdout;
-  writeExecutable(destination, binary);
 }
 
 function packageSlug(packageName: string): string {
