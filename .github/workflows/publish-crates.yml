@@ -1,0 +1,43 @@
+name: Publish crates.io packages
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+      tag:
+        required: false
+        type: string
+      tag-flag:
+        required: false
+        type: string
+      publishing:
+        required: false
+        type: string
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: true
+
+jobs:
+  publish-crates:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Resolve release version
+        id: version
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          version=$(jq -r '.releases[0].app_version' <<<"${PLAN}")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Publish crates.io packages
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: scripts/publish-crates.sh "${{ steps.version.outputs.version }}"

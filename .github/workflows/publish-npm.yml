@@ -1,0 +1,50 @@
+name: Publish npm packages
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+      tag:
+        required: false
+        type: string
+      tag-flag:
+        required: false
+        type: string
+      publishing:
+        required: false
+        type: string
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Fetch cargo-dist artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Resolve release version
+        id: version
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          version=$(jq -r '.releases[0].app_version' <<<"${PLAN}")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Publish npm packages with provenance
+        env:
+          ARTIFACTS_DIR: target/distrib
+        run: scripts/publish-npm-packages.sh "${{ steps.version.outputs.version }}"

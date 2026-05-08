@@ -1,6 +1,11 @@
 [package]
+description = "Core Heimdall sandbox runtime orchestration and execution types."
 edition.workspace = true
+homepage.workspace = true
+license.workspace = true
 name = "heimdall-core"
+readme.workspace = true
+repository.workspace = true
 version.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

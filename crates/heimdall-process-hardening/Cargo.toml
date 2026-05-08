@@ -1,6 +1,11 @@
 [package]
+description = "Process hardening helpers for Heimdall sandboxed child processes."
 edition.workspace = true
+homepage.workspace = true
+license.workspace = true
 name = "heimdall-process-hardening"
+readme.workspace = true
+repository.workspace = true
 version.workspace = true
 
 [dependencies]

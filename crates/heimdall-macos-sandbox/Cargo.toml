@@ -1,6 +1,11 @@
 [package]
+description = "macOS Seatbelt sandbox backend for Heimdall."
 edition.workspace = true
+homepage.workspace = true
+license.workspace = true
 name = "heimdall-macos-sandbox"
+readme.workspace = true
+repository.workspace = true
 version.workspace = true
 
 [dependencies]

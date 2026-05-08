@@ -29,7 +29,13 @@ Shell installer:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/casualjim/heimdall-sandbox/releases/latest/download/heimdall-sandbox-installer.sh | sh
 ```
 
-From source:
+npm (macOS Apple Silicon, Linux x64, and Linux arm64):
+
+```sh
+npm install -g @casualjim/heimdall-sandbox
+```
+
+Cargo registry:
 
 ```sh
 cargo install heimdall-sandbox

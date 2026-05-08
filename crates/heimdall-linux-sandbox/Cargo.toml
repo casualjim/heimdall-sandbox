@@ -1,6 +1,11 @@
 [package]
+description = "Linux sandbox backend for Heimdall using bubblewrap and namespaces."
 edition.workspace = true
+homepage.workspace = true
+license.workspace = true
 name = "heimdall-linux-sandbox"
+readme.workspace = true
+repository.workspace = true
 version.workspace = true
 
 [dependencies]

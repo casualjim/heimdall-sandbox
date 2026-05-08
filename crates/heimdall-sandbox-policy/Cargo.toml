@@ -1,6 +1,11 @@
 [package]
+description = "Policy document types and filesystem policy materialization for Heimdall."
 edition.workspace = true
+homepage.workspace = true
+license.workspace = true
 name = "heimdall-sandbox-policy"
+readme.workspace = true
+repository.workspace = true
 version.workspace = true
 
 [dependencies]
