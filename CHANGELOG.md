@@ -1,3 +1,8 @@
+## [0.1.10] - 2026-05-08
+
+### 🐛 Bug Fixes
+
+- Avoid crates.io API checks during publish
 ## [0.1.9] - 2026-05-08
 
 ### 🐛 Bug Fixes
@@ -5,6 +10,11 @@
 - Use Node tooling for npm package assembly
 - Handle downloaded cargo-dist artifact layout
 - Retry crates.io publish attempts
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.9 [ci skip]
+- Release version 0.1.9
 ## [0.1.8] - 2026-05-08
 
 ### 🚀 Features
