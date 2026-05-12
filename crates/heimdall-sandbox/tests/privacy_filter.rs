@@ -1,6 +1,7 @@
 //! Integration tests for `heimdall-sandbox setup` and `heimdall-sandbox privacy-filter` commands.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn sandbox() -> Command {
     Command::new(env!("CARGO_BIN_EXE_heimdall-sandbox"))
@@ -68,8 +69,7 @@ fn redact_help_shows_expected_flags() {
         .expect("privacy-filter redact --help runs");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--text"));
-    assert!(stdout.contains("--stdin"));
+    assert!(stdout.contains("TEXT_OR_FILE"));
     assert!(stdout.contains("--cache-dir"));
     assert!(stdout.contains("--variant"));
     assert!(stdout.contains("--revision"));
@@ -77,60 +77,68 @@ fn redact_help_shows_expected_flags() {
 }
 
 #[test]
-fn redact_text_parses_correctly() {
+fn redact_positional_text_parses() {
     let output = sandbox()
         .arg("privacy-filter")
         .arg("redact")
-        .arg("--text")
         .arg("email alice@example.com")
         .arg("--help")
         .output()
-        .expect("privacy-filter redact --text parses");
+        .expect("privacy-filter redact with positional text parses");
 
     assert!(output.status.success());
 }
 
 #[test]
-fn redact_stdin_parses_correctly() {
-    let output = sandbox()
+fn redact_empty_stdin_is_rejected() {
+    let mut child = sandbox()
         .arg("privacy-filter")
         .arg("redact")
-        .arg("--stdin")
-        .arg("--help")
-        .output()
-        .expect("privacy-filter redact --stdin parses");
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sandbox command starts");
+    // Close stdin immediately to provide empty input.
+    drop(child.stdin.take());
 
-    assert!(output.status.success());
-}
-
-#[test]
-fn redact_text_and_stdin_are_mutually_exclusive() {
-    let output = sandbox()
-        .arg("privacy-filter")
-        .arg("redact")
-        .arg("--text")
-        .arg("hello")
-        .arg("--stdin")
-        .output()
-        .expect("privacy-filter redact with both flags runs");
-
+    let output = child.wait_with_output().expect("sandbox command exits");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--text") || stderr.contains("--stdin"),
-        "expected conflict error, got: {stderr}"
+        stderr.contains("empty"),
+        "expected 'empty' error, got: {stderr}"
     );
 }
 
 #[test]
-fn redact_without_text_or_stdin_is_rejected() {
-    let output = sandbox()
+fn redact_reads_from_stdin() {
+    let mut child = sandbox()
         .arg("privacy-filter")
         .arg("redact")
-        .output()
-        .expect("privacy-filter redact without input runs");
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sandbox command starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(b"alice@example.com")
+        .expect("stdin write succeeds");
 
-    assert!(!output.status.success());
+    let output = child.wait_with_output().expect("sandbox command exits");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[REDACTED:"),
+        "expected redaction in output, got: {stdout}"
+    );
 }
 
 #[test]
@@ -138,10 +146,9 @@ fn redact_execution_provider_parses() {
     let output = sandbox()
         .arg("privacy-filter")
         .arg("redact")
-        .arg("--text")
-        .arg("test")
         .arg("--execution-provider")
         .arg("cpu")
+        .arg("test")
         .arg("--help")
         .output()
         .expect("privacy-filter redact --execution-provider parses");

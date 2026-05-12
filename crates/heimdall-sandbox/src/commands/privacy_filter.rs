@@ -1,6 +1,6 @@
 //! `heimdall-sandbox privacy-filter` command and subcommands.
 
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -25,15 +25,17 @@ enum PrivacyFilterCommands {
 }
 
 /// Redact sensitive information from text.
+///
+/// Input is read from a positional argument, a file, or stdin:
+///
+///   heimdall-sandbox privacy-filter redact "alice@example.com"
+///   echo "alice@example.com" | heimdall-sandbox privacy-filter redact
+///   heimdall-sandbox privacy-filter redact input.txt
 #[derive(Debug, Parser)]
 pub struct RedactArgs {
-    /// Text to redact directly from the command line.
-    #[arg(long = "text", conflicts_with = "stdin")]
-    text: Option<String>,
-
-    /// Read text to redact from stdin.
-    #[arg(long)]
-    stdin: bool,
+    /// Text to redact, or a file path. When omitted, reads from stdin.
+    #[arg(value_name = "TEXT_OR_FILE")]
+    input: Option<String>,
 
     /// Override the Hugging Face cache directory for model storage.
     #[arg(long = "cache-dir")]
@@ -65,7 +67,7 @@ fn run_redact_command(args: RedactArgs) -> i32 {
     let execution_provider = args.execution_provider;
     let cache_dir = args.cache_dir.clone();
 
-    let text = match redact_input(args) {
+    let text = match read_input(args.input) {
         Ok(text) => text,
         Err(error) => {
             eprintln!("{error}");
@@ -101,19 +103,35 @@ fn run_redact_command(args: RedactArgs) -> i32 {
     }
 }
 
-fn redact_input(args: RedactArgs) -> Result<String, String> {
-    if let Some(text) = args.text {
-        return Ok(text);
-    }
-    if args.stdin {
-        let mut text = String::new();
-        io::stdin()
-            .read_to_string(&mut text)
-            .map_err(|error| format!("failed to read stdin: {error}"))?;
-        if text.is_empty() {
-            return Err("stdin is empty".to_string());
+/// Read input text from a positional arg, file, or stdin.
+///
+/// - `Some(arg)` where `arg` is a path to an existing file → read file
+/// - `Some(arg)` literal text → use as-is
+/// - `None` + stdin is a pipe/redirect → read stdin
+/// - `None` + stdin is a terminal → error
+fn read_input(input: Option<String>) -> Result<String, String> {
+    if let Some(arg) = input {
+        let path = PathBuf::from(&arg);
+        if path.is_file() {
+            return std::fs::read_to_string(&path)
+                .map_err(|error| format!("{}: {error}", path.display()));
         }
-        return Ok(text);
+        if arg.is_empty() {
+            return Err("input text is empty".to_string());
+        }
+        return Ok(arg);
     }
-    Err("provide --text or --stdin".to_string())
+
+    if io::stdin().is_terminal() {
+        return Err("no input: provide text argument, pipe input, or redirect a file".to_string());
+    }
+
+    let mut text = String::new();
+    io::stdin()
+        .read_to_string(&mut text)
+        .map_err(|error| format!("failed to read stdin: {error}"))?;
+    if text.is_empty() {
+        return Err("stdin is empty".to_string());
+    }
+    Ok(text)
 }
