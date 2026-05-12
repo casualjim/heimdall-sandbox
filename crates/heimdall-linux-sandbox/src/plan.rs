@@ -248,7 +248,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
     fn add_policy_mounts(&mut self) {
         self.ro_bind(self.request.cwd, self.request.cwd);
-        for writable in &self.materialized.writable_targets {
+        for writable in self.materialized.writable_targets() {
             self.bind(writable, writable);
         }
 
@@ -261,14 +261,14 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
         let empty_file = self.resources.empty_file();
         let empty_dir = self.resources.empty_dir();
-        for denied in &self.materialized.deny_targets {
+        for denied in self.materialized.deny_targets() {
             if denied.is_dir() {
                 self.ro_bind(&empty_dir, denied);
             } else {
                 self.ro_bind(&empty_file, denied);
             }
         }
-        for protected in &self.materialized.protected_targets {
+        for protected in self.materialized.protected_targets() {
             let source = if protected.exists() && !protected.is_dir() {
                 &empty_file
             } else {
@@ -352,11 +352,7 @@ mod tests {
     use super::*;
 
     fn empty_materialized_policy() -> MaterializedFilesystemPolicy {
-        MaterializedFilesystemPolicy {
-            deny_targets: BTreeSet::new(),
-            writable_targets: BTreeSet::new(),
-            protected_targets: BTreeSet::new(),
-        }
+        MaterializedFilesystemPolicy::empty()
     }
 
     #[test]
@@ -589,11 +585,11 @@ mod tests {
         };
         let plan = request
             .into_plan_with_bwrap(
-                MaterializedFilesystemPolicy {
-                    deny_targets: BTreeSet::from([denied.clone()]),
-                    writable_targets: BTreeSet::from([cwd.clone()]),
-                    protected_targets: BTreeSet::new(),
-                },
+                MaterializedFilesystemPolicy::new(
+                    BTreeSet::from([denied.clone()]),
+                    BTreeSet::from([cwd.clone()]),
+                    BTreeSet::new(),
+                ),
                 PathBuf::from("/usr/bin/bwrap"),
             )
             .expect("plan builds");

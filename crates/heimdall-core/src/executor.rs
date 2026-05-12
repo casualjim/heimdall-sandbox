@@ -5,7 +5,7 @@ use std::thread;
 use crate::child::ChildGuard;
 use crate::environment::{build_child_environment, strip_dangerous_environment};
 use crate::outcome::child_outcome;
-use crate::request::{EnvPolicy, ExecRequest, StdioPolicy, validate_cwd};
+use crate::request::{EnvPolicy, ExecRequest, StdioPolicy};
 use crate::{Error, Result};
 
 #[cfg(target_os = "linux")]
@@ -14,6 +14,11 @@ use heimdall_linux_sandbox::BubblewrapRequest;
 use heimdall_macos_sandbox::SeatbeltRequest;
 
 /// Executes sandbox requests.
+///
+/// A zero-sized marker type that namespaces sandbox execution methods.
+/// Using a type rather than free functions allows future extension (e.g.
+/// injecting custom signal handlers or loggers) without changing call sites.
+#[derive(Debug, Default)]
 pub struct Executor;
 
 impl Executor {
@@ -56,7 +61,6 @@ impl Executor {
         request: &ExecRequest,
         hardener: impl FnOnce() -> std::io::Result<()> + Send + Sync + 'static,
     ) -> Result<i32> {
-        validate_cwd(request.cwd())?;
         let child_environment = self.child_environment(request);
 
         let mut command = Command::new(&request.argv()[0]);
@@ -125,7 +129,6 @@ impl Executor {
 
     #[cfg(target_os = "linux")]
     fn execute_with_bubblewrap(&self, request: &ExecRequest) -> Result<i32> {
-        validate_cwd(request.cwd())?;
         let plan = BubblewrapRequest {
             cwd: request.cwd(),
             argv: request.argv(),
@@ -150,7 +153,6 @@ impl Executor {
 
     #[cfg(target_os = "macos")]
     fn execute_with_seatbelt(&self, request: &ExecRequest) -> Result<i32> {
-        validate_cwd(request.cwd())?;
         let plan = SeatbeltRequest {
             cwd: request.cwd(),
             argv: request.argv(),
@@ -218,11 +220,15 @@ impl OutputForwarding {
     }
 
     fn join(self) {
-        if let Some(stdout) = self.stdout {
-            let _ = stdout.join();
+        if let Some(stdout) = self.stdout
+            && let Err(panic) = stdout.join()
+        {
+            std::panic::resume_unwind(panic);
         }
-        if let Some(stderr) = self.stderr {
-            let _ = stderr.join();
+        if let Some(stderr) = self.stderr
+            && let Err(panic) = stderr.join()
+        {
+            std::panic::resume_unwind(panic);
         }
     }
 }

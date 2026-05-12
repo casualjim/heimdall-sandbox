@@ -8,8 +8,6 @@ mod virtual_files;
 use thiserror::Error as ThisError;
 
 pub use plan::{BubblewrapPlan, BubblewrapRequest};
-pub use policy::validate_filesystem_policy;
-pub use policy::{FilesystemPolicy, NetworkMode, ProcMode};
 
 /// Result type for Linux sandbox operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -17,21 +15,29 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors returned by Linux sandbox planning and policy materialization.
 #[derive(Debug, ThisError)]
 pub enum Error {
-    /// Sandbox policy or platform setup is invalid.
+    /// Shared sandbox policy is invalid or materialization failed.
     #[error("sandbox misconfiguration: {0}")]
-    SandboxMisconfiguration(String),
+    SandboxPolicy(#[source] heimdall_sandbox_policy::Error),
+    /// Sandbox policy or platform setup is invalid for reasons not covered by shared policy errors.
+    #[error("sandbox misconfiguration: {message}")]
+    Platform {
+        /// Description of the platform misconfiguration.
+        message: String,
+    },
 }
 
 impl Error {
-    /// Construct a sandbox misconfiguration error.
+    /// Construct a platform sandbox misconfiguration error.
     #[must_use]
     pub fn sandbox_misconfiguration(message: impl Into<String>) -> Self {
-        Self::SandboxMisconfiguration(message.into())
+        Self::Platform {
+            message: message.into(),
+        }
     }
 }
 
 impl From<heimdall_sandbox_policy::Error> for Error {
     fn from(error: heimdall_sandbox_policy::Error) -> Self {
-        Self::sandbox_misconfiguration(error.to_string())
+        Self::SandboxPolicy(error)
     }
 }

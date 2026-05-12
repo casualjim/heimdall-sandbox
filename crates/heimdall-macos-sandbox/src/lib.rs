@@ -246,6 +246,12 @@ pub enum Error {
     /// Shared sandbox policy materialization failed.
     #[error(transparent)]
     Policy(#[from] heimdall_sandbox_policy::Error),
+    /// A required platform directory path could not be resolved.
+    #[error("failed to resolve platform directory: {message}")]
+    PlatformDirectory {
+        /// Description of the missing directory.
+        message: String,
+    },
 }
 
 /// Structured input used to build a macOS Seatbelt invocation.
@@ -331,18 +337,30 @@ struct SeatbeltPolicy {
     params: Vec<(String, PathBuf)>,
 }
 
+struct DecomposedTargets {
+    deny_targets: BTreeSet<PathBuf>,
+    writable_targets: BTreeSet<PathBuf>,
+    protected_targets: BTreeSet<PathBuf>,
+}
+
 struct SeatbeltPolicyBuilder<'a> {
     request: &'a SeatbeltRequest<'a>,
-    materialized: MaterializedFilesystemPolicy,
+    targets: DecomposedTargets,
     params: Vec<(String, PathBuf)>,
     next_param: usize,
 }
 
 impl<'a> SeatbeltPolicyBuilder<'a> {
     fn new(request: &'a SeatbeltRequest<'a>, materialized: MaterializedFilesystemPolicy) -> Self {
+        let (deny_targets, writable_targets, protected_targets) = materialized.into_parts();
+        let targets = DecomposedTargets {
+            deny_targets,
+            writable_targets,
+            protected_targets,
+        };
         Self {
             request,
-            materialized,
+            targets,
             params: Vec::new(),
             next_param: 0,
         }
@@ -355,12 +373,13 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         text.push_str(PLATFORM_DEFAULTS);
         text.push('\n');
         text.push_str(&self.read_policy());
-        let heimdall_wildcard_write_deny_policy = self.heimdall_wildcard_write_deny_policy();
-        text.push_str(&self.write_policy());
+        let heimdall_wildcard = self.heimdall_wildcard_write_deny_policy();
+        let exclusions = self.write_exclusions();
+        text.push_str(&self.write_policy(&exclusions));
         text.push_str(&self.deny_policy());
         text.push_str(&self.virtual_write_deny_policy());
-        text.push_str(&heimdall_wildcard_write_deny_policy);
-        text.push_str(&self.network_policy());
+        text.push_str(&heimdall_wildcard);
+        text.push_str(&self.network_policy()?);
         Ok(SeatbeltPolicy {
             text,
             params: self.params,
@@ -378,12 +397,11 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         policy
     }
 
-    fn write_policy(&mut self) -> String {
-        if self.materialized.writable_targets.is_empty() {
+    fn write_policy(&mut self, exclusions: &BTreeSet<PathBuf>) -> String {
+        if self.targets.writable_targets.is_empty() {
             return String::new();
         }
-        let exclusions = self.write_exclusions();
-        let writable_targets = std::mem::take(&mut self.materialized.writable_targets);
+        let writable_targets = std::mem::take(&mut self.targets.writable_targets);
         let mut rules = String::new();
         for writable in writable_targets {
             for writable_alias in path_aliases(&writable) {
@@ -412,10 +430,10 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
 
     fn write_exclusions(&self) -> BTreeSet<PathBuf> {
         let mut exclusions = BTreeSet::new();
-        for denied in &self.materialized.deny_targets {
+        for denied in &self.targets.deny_targets {
             exclusions.extend(path_aliases(denied));
         }
-        for protected in &self.materialized.protected_targets {
+        for protected in &self.targets.protected_targets {
             exclusions.extend(path_aliases(protected));
         }
         for path in self.request.filesystem_policy.virtual_files().keys() {
@@ -426,7 +444,7 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
 
     fn deny_policy(&mut self) -> String {
         let mut rules = String::new();
-        let deny_targets = std::mem::take(&mut self.materialized.deny_targets);
+        let deny_targets = std::mem::take(&mut self.targets.deny_targets);
         for denied in deny_targets {
             for alias in path_aliases(&denied) {
                 let param = self.path_param("DENY", &alias);
@@ -446,7 +464,7 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
                 }
             }
         }
-        let protected_targets = std::mem::take(&mut self.materialized.protected_targets);
+        let protected_targets = std::mem::take(&mut self.targets.protected_targets);
         for protected in protected_targets {
             for alias in path_aliases(&protected) {
                 let param = self.path_param("PROTECTED", &alias);
@@ -484,9 +502,9 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         rules
     }
 
-    fn heimdall_wildcard_write_deny_policy(&mut self) -> String {
+    fn heimdall_wildcard_write_deny_policy(&self) -> String {
         if !self
-            .materialized
+            .targets
             .writable_targets
             .iter()
             .any(|target| target == self.request.cwd)
@@ -505,16 +523,18 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
             .collect()
     }
 
-    fn network_policy(&mut self) -> String {
+    fn network_policy(&mut self) -> Result<String> {
         if self.request.network_mode == NetworkMode::None {
-            return String::new();
+            return Ok(String::new());
         }
-        self.params
-            .push(("DARWIN_USER_CACHE_DIR".to_string(), darwin_user_cache_dir()));
-        format!(
+        self.params.push((
+            "DARWIN_USER_CACHE_DIR".to_string(),
+            darwin_user_cache_dir()?,
+        ));
+        Ok(format!(
             "(allow network-outbound)\n(allow network-inbound)\n{}\n",
             NETWORK_SUPPORT_POLICY
-        )
+        ))
     }
 
     fn path_param(&mut self, prefix: &str, path: &Path) -> String {
@@ -584,7 +604,7 @@ fn regex_escape(value: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn darwin_user_cache_dir() -> PathBuf {
+fn darwin_user_cache_dir() -> Result<PathBuf> {
     use std::ffi::CStr;
 
     let mut buffer = vec![0_i8; (libc::PATH_MAX as usize) + 1];
@@ -599,17 +619,19 @@ fn darwin_user_cache_dir() -> PathBuf {
     if len > 0 {
         // SAFETY: `confstr` writes a nul-terminated string when it returns a non-zero length.
         if let Ok(path) = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_str() {
-            return PathBuf::from(path)
+            return Ok(PathBuf::from(path)
                 .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(path));
+                .unwrap_or_else(|_| PathBuf::from(path)));
         }
     }
-    std::env::temp_dir()
+    Err(Error::PlatformDirectory {
+        message: "confstr(_CS_DARWIN_USER_CACHE_DIR) returned empty path".to_string(),
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn darwin_user_cache_dir() -> PathBuf {
-    std::env::temp_dir()
+fn darwin_user_cache_dir() -> Result<PathBuf> {
+    Ok(std::env::temp_dir())
 }
 
 #[cfg(test)]
@@ -635,11 +657,7 @@ mod tests {
     }
 
     fn empty_materialized_policy() -> MaterializedFilesystemPolicy {
-        MaterializedFilesystemPolicy {
-            deny_targets: BTreeSet::new(),
-            writable_targets: BTreeSet::new(),
-            protected_targets: BTreeSet::new(),
-        }
+        MaterializedFilesystemPolicy::empty()
     }
 
     fn policy_arg(args: &[String]) -> &str {
@@ -725,11 +743,11 @@ mod tests {
             vec![".".into()],
             Default::default(),
         );
-        let materialized = MaterializedFilesystemPolicy {
-            deny_targets: BTreeSet::from([denied.clone()]),
-            writable_targets: BTreeSet::from([cwd.clone()]),
-            protected_targets: BTreeSet::new(),
-        };
+        let materialized = MaterializedFilesystemPolicy::new(
+            BTreeSet::from([denied.clone()]),
+            BTreeSet::from([cwd.clone()]),
+            BTreeSet::new(),
+        );
         let plan = request(&cwd, &argv, &filesystem_policy)
             .into_plan_with_materialized(materialized)
             .expect("plan builds");
@@ -753,11 +771,11 @@ mod tests {
         let argv = ["true".to_string()];
         let filesystem_policy =
             FilesystemPolicy::new(Vec::new(), vec![".".into()], Default::default());
-        let materialized = MaterializedFilesystemPolicy {
-            deny_targets: BTreeSet::new(),
-            writable_targets: BTreeSet::from([cwd.clone()]),
-            protected_targets: BTreeSet::from([protected.clone()]),
-        };
+        let materialized = MaterializedFilesystemPolicy::new(
+            BTreeSet::new(),
+            BTreeSet::from([cwd.clone()]),
+            BTreeSet::from([protected.clone()]),
+        );
         let plan = request(&cwd, &argv, &filesystem_policy)
             .into_plan_with_materialized(materialized)
             .expect("plan builds");
@@ -783,11 +801,11 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        let materialized = MaterializedFilesystemPolicy {
-            deny_targets: BTreeSet::new(),
-            writable_targets: BTreeSet::from([cwd]),
-            protected_targets: BTreeSet::new(),
-        };
+        let materialized = MaterializedFilesystemPolicy::new(
+            BTreeSet::new(),
+            BTreeSet::from([cwd]),
+            BTreeSet::new(),
+        );
         let plan = request(Path::new("/tmp"), &argv, &filesystem_policy)
             .into_plan_with_materialized(materialized)
             .expect("plan builds");

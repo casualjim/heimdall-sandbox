@@ -109,6 +109,15 @@ pub enum NetworkMode {
     None,
 }
 
+impl std::fmt::Display for NetworkMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host => formatter.write_str("host"),
+            Self::None => formatter.write_str("none"),
+        }
+    }
+}
+
 /// Child proc filesystem mount policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcMode {
@@ -116,6 +125,15 @@ pub enum ProcMode {
     Default,
     /// Do not mount `/proc` inside the sandbox.
     Disabled,
+}
+
+impl std::fmt::Display for ProcMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Default => formatter.write_str("default"),
+            Self::Disabled => formatter.write_str("disabled"),
+        }
+    }
 }
 
 /// Filesystem sandbox policy expressed as cwd-relative gitignore-style pattern lists.
@@ -169,12 +187,65 @@ impl FilesystemPolicy {
 /// Concrete filesystem decisions materialized from cwd-relative policy patterns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializedFilesystemPolicy {
+    deny_targets: BTreeSet<PathBuf>,
+    writable_targets: BTreeSet<PathBuf>,
+    protected_targets: BTreeSet<PathBuf>,
+}
+
+impl MaterializedFilesystemPolicy {
+    /// Create a materialized policy from the given target sets.
+    ///
+    /// The caller is responsible for ensuring deny precedence over writable targets.
+    #[must_use]
+    pub fn new(
+        deny_targets: BTreeSet<PathBuf>,
+        writable_targets: BTreeSet<PathBuf>,
+        protected_targets: BTreeSet<PathBuf>,
+    ) -> Self {
+        Self {
+            deny_targets,
+            writable_targets,
+            protected_targets,
+        }
+    }
+
+    /// Create an empty materialized policy with no targets.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            deny_targets: BTreeSet::new(),
+            writable_targets: BTreeSet::new(),
+            protected_targets: BTreeSet::new(),
+        }
+    }
+
     /// Existing paths selected by deny policy.
-    pub deny_targets: BTreeSet<PathBuf>,
+    #[must_use]
+    pub fn deny_targets(&self) -> &BTreeSet<PathBuf> {
+        &self.deny_targets
+    }
+
     /// Existing paths selected by writable policy after deny precedence.
-    pub writable_targets: BTreeSet<PathBuf>,
+    #[must_use]
+    pub fn writable_targets(&self) -> &BTreeSet<PathBuf> {
+        &self.writable_targets
+    }
+
     /// Protected control paths that must not become writable.
-    pub protected_targets: BTreeSet<PathBuf>,
+    #[must_use]
+    pub fn protected_targets(&self) -> &BTreeSet<PathBuf> {
+        &self.protected_targets
+    }
+
+    /// Decompose into owned target sets.
+    #[must_use]
+    pub fn into_parts(self) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
+        (
+            self.deny_targets,
+            self.writable_targets,
+            self.protected_targets,
+        )
+    }
 }
 
 /// Materializes cwd-relative gitignore-style filesystem policy into concrete paths.
@@ -413,10 +484,10 @@ mod tests {
             .materialize()
             .expect("policy materializes");
 
-        assert!(materialized.deny_targets.contains(&cwd.join(".env")));
+        assert!(materialized.deny_targets().contains(&cwd.join(".env")));
         assert!(
             !materialized
-                .deny_targets
+                .deny_targets()
                 .contains(&cwd.join(".env.example"))
         );
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
@@ -437,7 +508,11 @@ mod tests {
             .materialize()
             .expect("policy materializes");
 
-        assert!(!materialized.deny_targets.contains(&cwd.join("secret.txt")));
+        assert!(
+            !materialized
+                .deny_targets()
+                .contains(&cwd.join("secret.txt"))
+        );
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
     }
 
@@ -466,15 +541,15 @@ mod tests {
             .materialize()
             .expect("policy materializes");
 
-        assert!(materialized.protected_targets.contains(&cwd.join(".git")));
+        assert!(materialized.protected_targets().contains(&cwd.join(".git")));
         assert!(
             materialized
-                .protected_targets
+                .protected_targets()
                 .contains(&cwd.join(".heimdall-local"))
         );
         assert!(
             materialized
-                .protected_targets
+                .protected_targets()
                 .contains(&cwd.join(DENY_FRAGMENT))
         );
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
@@ -494,10 +569,10 @@ mod tests {
             .materialize()
             .expect("policy materializes");
 
-        assert!(materialized.deny_targets.contains(&cwd.join("data.txt")));
+        assert!(materialized.deny_targets().contains(&cwd.join("data.txt")));
         assert!(
             !materialized
-                .writable_targets
+                .writable_targets()
                 .contains(&cwd.join("data.txt"))
         );
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
