@@ -284,7 +284,8 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "failed to resolve current executable: {error}"
             ))
         })?;
-        self.ro_bind(&current_exe, Path::new("/heimdall-inner"));
+        let inner_exe = Self::inner_executable(&current_exe);
+        self.ro_bind(&inner_exe, Path::new("/heimdall-inner"));
         self.args.push("--chdir".into());
         self.args.push(self.request.cwd.as_os_str().to_os_string());
         if self.launcher.supports_argv0 {
@@ -302,6 +303,18 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.args
             .extend(self.request.argv.iter().map(OsString::from));
         Ok(())
+    }
+
+    fn inner_executable(current_exe: &Path) -> PathBuf {
+        let Some(parent) = current_exe.parent() else {
+            return current_exe.to_path_buf();
+        };
+        let candidate = parent.join("heimdall-sandbox-inner");
+        if candidate.is_file() {
+            candidate
+        } else {
+            current_exe.to_path_buf()
+        }
     }
 
     fn ro_bind(&mut self, source: &Path, destination: &Path) {

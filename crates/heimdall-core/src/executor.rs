@@ -148,7 +148,28 @@ impl Executor {
             .envs(self.child_environment(request));
         Self::configure_stdio(&mut command, request.stdio_policy());
         install_bubblewrap_child_setup(&mut command);
-        self.execute_command_with_signal_target(command, request.stdio_policy(), true)
+        self.execute_bubblewrap_command(command, request.stdio_policy())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn execute_bubblewrap_command(
+        &self,
+        mut command: Command,
+        stdio_policy: StdioPolicy,
+    ) -> Result<i32> {
+        let forwarding = crate::signal::SignalForwarding::install_for_bubblewrap_payload()?;
+
+        let mut child = command.spawn().map_err(Error::Spawn)?;
+        let output_forwarding = OutputForwarding::start(&mut child, stdio_policy);
+        let mut child = ChildGuard::new(child);
+
+        forwarding.set_child(child.id())?;
+
+        let status = child.wait()?;
+        output_forwarding.join();
+        drop(forwarding);
+
+        Ok(child_outcome(status).exit_code())
     }
 
     #[cfg(target_os = "macos")]
