@@ -1,8 +1,15 @@
+## [0.1.17] - 2026-05-13
+
+### ⚙️ Miscellaneous Tasks
+
+- Publish privacy filter crate before CLI
 ## [0.1.16] - 2026-05-13
 
 ### ⚙️ Miscellaneous Tasks
 
 - Build x86 release on Ubuntu 24.04
+- Update changelog for v0.1.16 [ci skip]
+- Release version 0.1.16
 ## [0.1.15] - 2026-05-13
 
 ### 🐛 Bug Fixes
