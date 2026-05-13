@@ -38,7 +38,7 @@ hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rus
 ignore = "0.4.25"
 libc = "0.2.177"
 ndarray = "0.17.1"
-ort = { version = "=2.0.0-rc.12", features = ["download-binaries", "ndarray", "webgpu"] }
+ort = { version = "=2.0.0-rc.12", features = ["download-binaries", "ndarray"] }
 schemars = { version = "1.0", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
