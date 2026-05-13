@@ -33,6 +33,7 @@ CRATES=(
   "heimdall-linux-sandbox"
   "heimdall-macos-sandbox"
   "heimdall-core"
+  "heimdall-privacy-filter"
   "heimdall-sandbox"
 )
 
