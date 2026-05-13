@@ -52,6 +52,11 @@ pub struct RedactArgs {
     /// ONNX Runtime execution provider.
     #[arg(long = "execution-provider", value_enum, default_value_t = CliExecutionProvider::Cpu)]
     execution_provider: CliExecutionProvider,
+
+    /// Override the usable token limit in debug builds for overflow tests.
+    #[cfg(debug_assertions)]
+    #[arg(long = "test-usable-token-limit", hide = true)]
+    test_usable_token_limit: Option<usize>,
 }
 
 /// Run a privacy-filter subcommand and return a process exit code.
@@ -90,10 +95,17 @@ fn run_redact_command(args: RedactArgs) -> i32 {
             return 1;
         }
     };
+    #[cfg(debug_assertions)]
+    if let Some(limit) = args.test_usable_token_limit {
+        runtime.set_usable_token_limit_for_test(limit);
+    }
 
     match redact_text(&mut runtime, &text) {
         Ok(redacted) => {
             println!("{redacted}");
+            if matches!(execution_provider, CliExecutionProvider::WebGpu) {
+                std::process::exit(0);
+            }
             0
         }
         Err(error) => {

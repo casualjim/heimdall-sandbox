@@ -322,7 +322,7 @@ fn decode_sequence(
                         context.byte_span(sequence, start, token)?
                 {
                     spans.push(DetectedSpan::new(
-                        sequence,
+                        context.source_sequence(sequence)?,
                         start_byte,
                         end_byte,
                         category,
@@ -336,7 +336,7 @@ fn decode_sequence(
                     && let Some((start, end)) = context.byte_span(sequence, token, token)?
                 {
                     spans.push(DetectedSpan::new(
-                        sequence,
+                        context.source_sequence(sequence)?,
                         start,
                         end,
                         category.to_string(),
@@ -348,6 +348,43 @@ fn decode_sequence(
     }
 
     Ok(PrivacySpanOutput { spans })
+}
+
+pub(crate) fn merge_detected_spans(mut spans: Vec<DetectedSpan>) -> Vec<DetectedSpan> {
+    spans.sort_by(|left, right| {
+        (
+            left.sequence(),
+            left.start(),
+            left.end(),
+            left.label().to_string(),
+        )
+            .cmp(&(
+                right.sequence(),
+                right.start(),
+                right.end(),
+                right.label().to_string(),
+            ))
+    });
+    let mut merged: Vec<DetectedSpan> = Vec::with_capacity(spans.len());
+
+    for span in spans {
+        let Some(last) = merged.last_mut() else {
+            merged.push(span);
+            continue;
+        };
+        let touches_with_same_label = span.start() == last.end() && span.label() == last.label();
+        let overlaps = span.start() < last.end();
+        if last.sequence() == span.sequence() && (overlaps || touches_with_same_label) {
+            let end = last.end().max(span.end());
+            let score = last.score().max(span.score());
+            let label = last.label().to_string();
+            *last = DetectedSpan::new(last.sequence(), last.start(), end, label, score);
+        } else {
+            merged.push(span);
+        }
+    }
+
+    merged
 }
 
 fn viterbi_path(
@@ -664,6 +701,42 @@ mod tests {
         let context = fake_context(vec!["abc", "def"]);
         let result = decode_logits(logits, context, &labels, zero_calibration()).unwrap();
         assert!(result.spans.is_empty());
+    }
+
+    #[test]
+    fn merge_detected_spans_deduplicates_overlap() {
+        let spans = vec![
+            DetectedSpan::new(0, 2, 8, "EMAIL".to_string(), 0.8),
+            DetectedSpan::new(0, 2, 8, "EMAIL".to_string(), 0.9),
+        ];
+        let merged = merge_detected_spans(spans);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].start(), 2);
+        assert_eq!(merged[0].end(), 8);
+        assert_eq!(merged[0].score(), 0.9);
+    }
+
+    #[test]
+    fn merge_detected_spans_covers_partial_overlap() {
+        let spans = vec![
+            DetectedSpan::new(0, 0, 5, "EMAIL".to_string(), 0.7),
+            DetectedSpan::new(0, 3, 9, "PHONE".to_string(), 0.8),
+        ];
+        let merged = merge_detected_spans(spans);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].start(), 0);
+        assert_eq!(merged[0].end(), 9);
+        assert_eq!(merged[0].label(), "EMAIL");
+    }
+
+    #[test]
+    fn merge_detected_spans_keeps_disjoint_spans() {
+        let spans = vec![
+            DetectedSpan::new(0, 0, 3, "EMAIL".to_string(), 0.7),
+            DetectedSpan::new(0, 5, 9, "PHONE".to_string(), 0.8),
+        ];
+        let merged = merge_detected_spans(spans);
+        assert_eq!(merged.len(), 2);
     }
 
     #[test]

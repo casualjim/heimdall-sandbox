@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::{Error, Result};
 
 /// Hugging Face model repository for OpenAI privacy-filter.
 pub const MODEL_REPOSITORY: &str = "openai/privacy-filter";
@@ -200,6 +203,40 @@ pub struct ModelAssetPaths {
     pub sidecars: Vec<PathBuf>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TokenizerMetadata {
+    model_max_length: Option<Value>,
+}
+
+/// Parse and validate the usable token limit from cached tokenizer metadata.
+pub(crate) fn usable_token_limit_from_tokenizer_config_json(json: &str) -> Result<usize> {
+    let metadata = serde_json::from_str::<TokenizerMetadata>(json)?;
+    let Some(value) = metadata.model_max_length else {
+        return Err(Error::InvalidAsset {
+            detail: "tokenizer_config.json is missing model_max_length".to_string(),
+        });
+    };
+    let limit = match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(raw) => raw.parse::<u64>().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| Error::InvalidAsset {
+        detail: "tokenizer_config.json model_max_length is not a positive integer".to_string(),
+    })?;
+    let limit = usize::try_from(limit).map_err(|error| Error::InvalidAsset {
+        detail: format!("tokenizer_config.json model_max_length is too large: {error}"),
+    })?;
+    if limit < 3 {
+        return Err(Error::InvalidAsset {
+            detail: format!(
+                "tokenizer_config.json model_max_length {limit} is too small for overlapping windows"
+            ),
+        });
+    }
+    Ok(limit)
+}
+
 impl ModelAssetPaths {
     /// Build asset paths from the Hugging Face snapshot root for the selected variant.
     #[must_use]
@@ -324,6 +361,39 @@ mod tests {
     // --- real model tests ---
 
     #[test]
+    fn usable_token_limit_reads_numeric_metadata() {
+        let json = r#"{"model_max_length": 128000}"#;
+        assert_eq!(
+            usable_token_limit_from_tokenizer_config_json(json).unwrap(),
+            128000
+        );
+    }
+
+    #[test]
+    fn usable_token_limit_reads_string_metadata() {
+        let json = r#"{"model_max_length": "128000"}"#;
+        assert_eq!(
+            usable_token_limit_from_tokenizer_config_json(json).unwrap(),
+            128000
+        );
+    }
+
+    #[test]
+    fn usable_token_limit_rejects_missing_metadata() {
+        assert!(usable_token_limit_from_tokenizer_config_json(r#"{}"#).is_err());
+    }
+
+    #[test]
+    fn usable_token_limit_rejects_unusable_metadata() {
+        assert!(
+            usable_token_limit_from_tokenizer_config_json(r#"{"model_max_length": 1}"#).is_err()
+        );
+        assert!(
+            usable_token_limit_from_tokenizer_config_json(r#"{"model_max_length": 2}"#).is_err()
+        );
+    }
+
+    #[test]
     fn setup_caches_all_files_for_q4() {
         let f = crate::testutil::fixture();
         assert!(f.assets.config.exists());
@@ -334,5 +404,11 @@ mod tests {
         for sidecar in &f.assets.sidecars {
             assert!(sidecar.exists(), "missing sidecar {}", sidecar.display());
         }
+    }
+
+    #[test]
+    fn real_tokenizer_metadata_has_usable_limit() {
+        let f = crate::testutil::fixture();
+        assert!(f.usable_token_limit > 1);
     }
 }

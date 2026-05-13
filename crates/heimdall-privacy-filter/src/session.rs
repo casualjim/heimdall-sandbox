@@ -6,7 +6,7 @@ use ort::value::TensorRef;
 
 use crate::input::EncodedPrivacyInput;
 use crate::model::{PrivacyExecutionProvider, PrivacyFilterConfig};
-use crate::{Error, Result};
+use crate::{Error, Result, ensure_ort_initialized};
 
 /// Owned logits tensor returned from ONNX Runtime.
 pub type LogitsTensor = ArrayD<f32>;
@@ -29,6 +29,7 @@ impl PrivacyOnnxSession {
         model_path: impl AsRef<std::path::Path>,
         config: &PrivacyFilterConfig,
     ) -> Result<Self> {
+        ensure_ort_initialized()?;
         let builder = Session::builder().map_err(onnx_error)?;
         let builder = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)

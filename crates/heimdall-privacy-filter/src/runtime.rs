@@ -4,8 +4,13 @@ use hf_hub::{Cache, Repo, RepoType};
 use tokenizers::Tokenizer;
 
 use crate::input::{EncodedPrivacyInput, PrivacyTextInput};
-use crate::model::{MODEL_REPOSITORY, ModelAssetPaths, PrivacyFilterConfig};
-use crate::output::{PrivacyLabels, PrivacySpanOutput, ViterbiCalibration, decode_logits};
+use crate::model::{
+    MODEL_REPOSITORY, ModelAssetPaths, PrivacyFilterConfig,
+    usable_token_limit_from_tokenizer_config_json,
+};
+use crate::output::{
+    PrivacyLabels, PrivacySpanOutput, ViterbiCalibration, decode_logits, merge_detected_spans,
+};
 use crate::session::PrivacyOnnxSession;
 use crate::{Error, Result};
 
@@ -15,6 +20,7 @@ pub struct PrivacyFilterRuntime {
     labels: PrivacyLabels,
     calibration: ViterbiCalibration,
     session: PrivacyOnnxSession,
+    usable_token_limit: usize,
 }
 
 impl PrivacyFilterRuntime {
@@ -30,6 +36,9 @@ impl PrivacyFilterRuntime {
         let calibration =
             ViterbiCalibration::from_json(&std::fs::read_to_string(&assets.viterbi)?)?;
         let tokenizer = Tokenizer::from_file(&assets.tokenizer)?;
+        let usable_token_limit = usable_token_limit_from_tokenizer_config_json(
+            &std::fs::read_to_string(&assets.tokenizer_config)?,
+        )?;
         let session = PrivacyOnnxSession::load(&assets.onnx, &config)?;
 
         Ok(Self {
@@ -37,7 +46,14 @@ impl PrivacyFilterRuntime {
             labels,
             calibration,
             session,
+            usable_token_limit,
         })
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub const fn set_usable_token_limit_for_test(&mut self, limit: usize) {
+        self.usable_token_limit = limit;
     }
 
     /// Detect sensitive spans in one text input.
@@ -47,11 +63,17 @@ impl PrivacyFilterRuntime {
 
     /// Detect sensitive spans in one or more text inputs.
     pub fn detect_batch(&mut self, input: PrivacyTextInput) -> Result<PrivacySpanOutput> {
-        let encoded =
-            EncodedPrivacyInput::encode(input, &self.tokenizer, self.labels.pad_token_id())?;
+        let encoded = EncodedPrivacyInput::encode(
+            input,
+            &self.tokenizer,
+            self.labels.pad_token_id(),
+            self.usable_token_limit,
+        )?;
         let context = encoded.context.clone();
         let logits = self.session.run(&encoded)?;
-        decode_logits(logits, context, &self.labels, self.calibration)
+        let mut output = decode_logits(logits, context, &self.labels, self.calibration)?;
+        output.spans = merge_detected_spans(output.spans);
+        Ok(output)
     }
 }
 
@@ -142,5 +164,22 @@ mod tests {
         let f = testutil::fixture();
         let mut runtime = PrivacyFilterRuntime::load(f.config.clone()).unwrap();
         let _ = runtime.detect_spans("just some words").unwrap();
+    }
+
+    #[test]
+    fn detect_spans_finds_email_after_first_window() {
+        let f = testutil::fixture();
+        let mut runtime = PrivacyFilterRuntime::load(f.config.clone()).unwrap();
+        runtime.set_usable_token_limit_for_test(32);
+        let text = format!("{} alice@example.com", "filler ".repeat(80));
+        let output = runtime.detect_spans(&text).unwrap();
+        assert!(
+            output
+                .spans
+                .iter()
+                .any(|span| span.label().contains("email") && span.start() > 100),
+            "expected email after first window, got {:?}",
+            output.spans
+        );
     }
 }

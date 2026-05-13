@@ -2,7 +2,9 @@
 
 use std::sync::OnceLock;
 
-use crate::model::{ModelAssetPaths, PrivacyFilterConfig};
+use crate::model::{
+    ModelAssetPaths, PrivacyFilterConfig, usable_token_limit_from_tokenizer_config_json,
+};
 use crate::output::{PrivacyLabels, ViterbiCalibration};
 use crate::setup::{SetupRequest, setup_privacy_filter};
 
@@ -12,6 +14,7 @@ pub(crate) struct ModelFixture {
     pub assets: ModelAssetPaths,
     pub labels: PrivacyLabels,
     pub calibration: ViterbiCalibration,
+    pub usable_token_limit: usize,
 }
 
 static FIXTURE: OnceLock<ModelFixture> = OnceLock::new();
@@ -30,11 +33,16 @@ pub(crate) fn fixture() -> &'static ModelFixture {
             &std::fs::read_to_string(&assets.viterbi).expect("viterbi"),
         )
         .expect("calibration");
+        let usable_token_limit = usable_token_limit_from_tokenizer_config_json(
+            &std::fs::read_to_string(&assets.tokenizer_config).expect("tokenizer_config"),
+        )
+        .expect("usable token limit");
         ModelFixture {
             config,
             assets,
             labels,
             calibration,
+            usable_token_limit,
         }
     })
 }

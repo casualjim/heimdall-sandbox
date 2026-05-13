@@ -17,7 +17,31 @@ mod setup;
 #[cfg(test)]
 mod testutil;
 
+use std::sync::OnceLock;
+
 use thiserror::Error as ThisError;
+
+static ORT_INIT_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+#[small_ctor::ctor]
+unsafe fn init_onnx_runtime() {
+    let result = ort::init()
+        .with_name("heimdall-privacy-filter")
+        .commit()
+        .then_some(())
+        .ok_or_else(|| "ONNX Runtime environment was already initialized".to_string());
+    let _ = ORT_INIT_RESULT.set(result);
+}
+
+fn ensure_ort_initialized() -> Result<()> {
+    match ORT_INIT_RESULT.get() {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(Error::Onnx(error.clone())),
+        None => Err(Error::Onnx(
+            "ONNX Runtime initialization did not run".to_string(),
+        )),
+    }
+}
 
 // --- public API ---
 

@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::output::DetectedSpan;
+use crate::output::{DetectedSpan, merge_detected_spans};
 use crate::runtime::PrivacyFilterRuntime;
 
 /// Raw local output plus redacted model-facing output for a captured text value.
@@ -30,8 +30,8 @@ pub fn redact_text(runtime: &mut PrivacyFilterRuntime, text: &str) -> Result<Str
     Ok(apply_spans(text, output.spans))
 }
 
-fn apply_spans(text: &str, mut spans: Vec<DetectedSpan>) -> String {
-    spans.sort_by_key(|span| (span.start(), span.end()));
+fn apply_spans(text: &str, spans: Vec<DetectedSpan>) -> String {
+    let spans = merge_detected_spans(spans);
     let mut redacted = String::with_capacity(text.len());
     let mut cursor = 0;
 
@@ -63,14 +63,14 @@ mod tests {
     // --- apply_spans adversarial (no model needed) ---
 
     #[test]
-    fn apply_spans_overlapping_spans_first_wins() {
+    fn apply_spans_overlapping_spans_redacts_union() {
         let text = "abcdefghij";
         let spans = vec![
             DetectedSpan::new(0, 0, 5, "A".to_string(), 1.0),
             DetectedSpan::new(0, 3, 8, "B".to_string(), 1.0),
         ];
         let result = apply_spans(text, spans);
-        assert_eq!(result, "[REDACTED:A]fghij");
+        assert_eq!(result, "[REDACTED:A]ij");
     }
 
     #[test]
@@ -133,6 +133,17 @@ mod tests {
         let captured = redact_captured_text(&mut runtime, "bob@company.org").unwrap();
         assert_eq!(captured.raw_for_user, "bob@company.org");
         assert_ne!(captured.redacted_for_llm, captured.raw_for_user);
+    }
+
+    #[test]
+    fn redact_email_after_first_window() {
+        let f = testutil::fixture();
+        let mut runtime = crate::runtime::PrivacyFilterRuntime::load(f.config.clone()).unwrap();
+        runtime.set_usable_token_limit_for_test(32);
+        let text = format!("{} alice@example.com", "filler ".repeat(80));
+        let result = redact_text(&mut runtime, &text).unwrap();
+        assert!(result.contains("[REDACTED:"), "got: {result}");
+        assert!(!result.contains("alice@example.com"), "got: {result}");
     }
 
     #[test]

@@ -14,5 +14,6 @@ ndarray.workspace = true
 ort.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+small_ctor.workspace = true
 thiserror.workspace = true
 tokenizers.workspace = true
