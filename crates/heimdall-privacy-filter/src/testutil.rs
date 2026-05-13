@@ -1,5 +1,6 @@
 //! Test-only utilities shared across `#[cfg(test)]` blocks.
 
+use std::fs::{File, OpenOptions};
 use std::sync::OnceLock;
 
 use crate::model::{
@@ -19,9 +20,37 @@ pub(crate) struct ModelFixture {
 
 static FIXTURE: OnceLock<ModelFixture> = OnceLock::new();
 
+struct DownloadLock {
+    _file: File,
+}
+
+fn acquire_download_lock() -> DownloadLock {
+    let path = std::env::temp_dir().join("heimdall-privacy-filter-model-download.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open privacy-filter model download lock at {}: {error}",
+                path.display()
+            )
+        });
+    file.lock().unwrap_or_else(|error| {
+        panic!(
+            "failed to acquire privacy-filter model download lock at {}: {error}",
+            path.display()
+        )
+    });
+    DownloadLock { _file: file }
+}
+
 pub(crate) fn fixture() -> &'static ModelFixture {
     FIXTURE.get_or_init(|| {
         let config = PrivacyFilterConfig::enabled();
+        let _download_lock = acquire_download_lock();
         let report = setup_privacy_filter(SetupRequest::new(config.clone()))
             .expect("model download must succeed");
         let assets = ModelAssetPaths::from_snapshot(&report.snapshot_root, config.variant());
