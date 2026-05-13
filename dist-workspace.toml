@@ -17,11 +17,6 @@ targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-app
 tap = "casualjim/homebrew-taps"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
-# Include the ort WebGPU Dawn shared library in archives alongside the binary.
-include = [
-  "target/release/libwebgpu_dawn.dylib",
-  "target/release/libwebgpu_dawn.so",
-]
 # Where to host releases
 hosting = "github"
 # Whether to install an updater program

@@ -148,6 +148,9 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: Package WebGPU Dawn library
+        shell: bash
+        run: scripts/package-webgpu-dawn.sh "${{ join(matrix.targets, '') }}"
       - name: Attest
         uses: actions/attest-build-provenance@v3
         with:
