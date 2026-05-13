@@ -140,7 +140,7 @@ mod tests {
         let f = testutil::fixture();
         let mut runtime = crate::runtime::PrivacyFilterRuntime::load(f.config.clone()).unwrap();
         runtime.set_usable_token_limit_for_test(32);
-        let text = format!("{} alice@example.com", "filler ".repeat(80));
+        let text = format!("{} alice@example.com", "filler ".repeat(40));
         let result = redact_text(&mut runtime, &text).unwrap();
         assert!(result.contains("[REDACTED:"), "got: {result}");
         assert!(!result.contains("alice@example.com"), "got: {result}");

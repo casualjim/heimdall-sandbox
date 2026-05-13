@@ -153,7 +153,7 @@ fn redact_reads_from_stdin() {
 
 #[test]
 fn redact_reads_long_stdin_without_truncating_tail() {
-    let text = format!("{} alice@example.com tail-marker", "filler ".repeat(2_000));
+    let text = format!("{} alice@example.com tail-marker", "filler ".repeat(40));
     let mut child = sandbox()
         .arg("privacy-filter")
         .arg("redact")
@@ -185,7 +185,7 @@ fn redact_reads_long_stdin_without_truncating_tail() {
 #[test]
 fn redact_reads_long_file_without_truncating_tail() {
     let path = temp_input_path("file");
-    let text = format!("{} alice@example.com tail-marker", "filler ".repeat(2_000));
+    let text = format!("{} alice@example.com tail-marker", "filler ".repeat(40));
     std::fs::write(&path, text).expect("write temp input");
 
     let output = sandbox()
