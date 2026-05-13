@@ -1,18 +1,25 @@
 //! Command-line parsing for the heimdall sandbox executable.
 
-use std::collections::BTreeMap;
-use std::io::Read;
-use std::path::PathBuf;
+use clap::{Parser, Subcommand};
 
-use clap::{Parser, Subcommand, ValueEnum};
-use heimdall_core::{
-    EnvPolicy, ExecRequest, Executor, FilesystemPolicy, NetworkMode, ProcMode,
-    SANDBOX_MISCONFIGURATION_EXIT_CODE, StdioPolicy,
-};
-use schemars::{JsonSchema, schema_for};
-use serde::Deserialize;
+use heimdall_core::{Executor, SANDBOX_MISCONFIGURATION_EXIT_CODE};
+
+use commands::exec::ExecArgs;
+use commands::inner_exec::InnerExecArgs;
+use commands::policy::PolicyArgs;
+use commands::privacy_filter::PrivacyFilterArgs;
+use commands::setup::SetupArgs;
+
+pub mod commands;
+mod error;
+pub mod policy;
+
+pub use error::{Error, Result};
 
 /// `heimdall-sandbox` command-line interface.
+///
+/// Parses CLI arguments into typed command structs that can be converted to
+/// [`heimdall_core::ExecRequest`] or dispatched to subcommands.
 #[derive(Debug, Parser)]
 #[command(
     name = "heimdall-sandbox",
@@ -33,150 +40,11 @@ enum Commands {
     /// Internal re-entry point used inside a Linux bubblewrap namespace.
     #[command(name = "__heimdall-inner-exec", hide = true)]
     InnerExec(InnerExecArgs),
-}
-
-#[derive(Debug, Parser)]
-struct PolicyArgs {
-    #[command(subcommand)]
-    command: PolicyCommands,
-}
-
-#[derive(Debug, Subcommand)]
-enum PolicyCommands {
-    /// Print the JSON schema for policy documents accepted by `exec --policy`.
-    Schema,
-    /// Validate a JSON policy document without executing it.
-    Validate(PolicyValidateArgs),
-}
-
-#[derive(Debug, Parser)]
-struct PolicyValidateArgs {
-    /// JSON sandbox policy path, or `-` to read the policy from stdin.
-    policy: String,
-}
-
-#[derive(Debug, Parser)]
-struct InnerExecArgs {
-    /// Child process working directory inside the namespace.
-    #[arg(long)]
-    cwd: PathBuf,
-
-    /// Child process stdio handling policy.
-    #[arg(long = "stdio", value_enum, default_value_t = CliStdioPolicy::Inherit)]
-    stdio: CliStdioPolicy,
-
-    /// Command argv to execute directly without shell parsing.
-    #[arg(trailing_var_arg = true)]
-    command: Vec<String>,
-}
-
-#[derive(Debug, Parser)]
-struct ExecArgs {
-    /// JSON sandbox policy path, or `-` to read the policy from stdin.
-    #[arg(long = "policy")]
-    policy: Option<String>,
-
-    /// Child process working directory.
-    #[arg(long)]
-    cwd: Option<PathBuf>,
-
-    /// Parent environment variable key to preserve in the child process.
-    #[arg(long = "allow-env")]
-    allow_env: Vec<String>,
-
-    /// Parent environment variable key to remove in blocklist mode.
-    #[arg(long = "deny-env", conflicts_with = "allow_env")]
-    deny_env: Vec<String>,
-
-    /// Child process stdio handling policy.
-    #[arg(long = "stdio", value_enum, default_value_t = CliStdioPolicy::Inherit)]
-    stdio: CliStdioPolicy,
-
-    /// Disable `/proc` mounting for Linux bubblewrap isolation.
-    #[arg(long = "no-proc")]
-    no_proc: bool,
-
-    /// Command argv to execute directly without shell parsing.
-    #[arg(trailing_var_arg = true)]
-    command: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-enum CliStdioPolicy {
-    /// Inherit stdin, stdout, and stderr from the sandbox process.
-    Inherit,
-    /// Null stdin and pipe stdout/stderr.
-    Piped,
-}
-
-impl std::fmt::Display for CliStdioPolicy {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Inherit => formatter.write_str("inherit"),
-            Self::Piped => formatter.write_str("piped"),
-        }
-    }
-}
-
-impl From<CliStdioPolicy> for StdioPolicy {
-    fn from(policy: CliStdioPolicy) -> Self {
-        match policy {
-            CliStdioPolicy::Inherit => Self::Inherit,
-            CliStdioPolicy::Piped => Self::Piped,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-struct PolicyDocument {
-    cwd: Option<PathBuf>,
-    command: Vec<String>,
-    #[serde(flatten)]
-    sandbox: SandboxConfig,
-    stdio: Option<CliStdioPolicy>,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-struct SandboxConfig {
-    enabled: Option<bool>,
-    network: Option<SandboxNetwork>,
-    proc: Option<SandboxProc>,
-    filesystem: Option<PolicyFilesystem>,
-    env: Option<PolicyEnvironment>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-enum SandboxNetwork {
-    Host,
-    None,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-enum SandboxProc {
-    Default,
-    None,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(deny_unknown_fields)]
-struct PolicyFilesystem {
-    deny: Option<Vec<String>>,
-    writable: Option<Vec<String>>,
-    #[serde(rename = "virtual")]
-    virtual_files: Option<BTreeMap<PathBuf, String>>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(deny_unknown_fields)]
-struct PolicyEnvironment {
-    allow: Option<Vec<String>>,
-    deny: Option<Vec<String>>,
+    /// Download privacy-filter model assets into the Hugging Face cache.
+    Setup(SetupArgs),
+    /// Privacy-filter model download and text redaction.
+    #[command(name = "privacy-filter")]
+    PrivacyFilter(PrivacyFilterArgs),
 }
 
 impl Cli {
@@ -188,218 +56,33 @@ impl Cli {
 
     /// Convert a parsed CLI invocation into a core execution request.
     ///
-    /// # Errors
-    ///
     /// Returns an error when parsing, policy loading, or core request validation fails.
-    pub fn into_exec_request(self) -> std::result::Result<ExecRequest, String> {
+    pub fn into_exec_request(self) -> error::Result<heimdall_core::ExecRequest> {
         match self.command {
-            Commands::Exec(args) => args.into_exec_request(),
-            Commands::Policy(_) => {
-                Err("policy commands do not create execution requests".to_string())
-            }
-            Commands::InnerExec(args) => args.into_exec_request(),
+            Commands::Exec(args) => policy::exec_args_to_request(args),
+            Commands::Policy(_) => Err(Error::arguments(
+                "policy commands do not create execution requests",
+            )),
+            Commands::InnerExec(args) => policy::inner_exec_args_to_request(args),
+            Commands::Setup(_) | Commands::PrivacyFilter(_) => Err(Error::arguments(
+                "setup/privacy-filter commands do not create execution requests",
+            )),
         }
     }
-}
-
-fn run_policy_command(args: PolicyArgs) -> std::result::Result<(), String> {
-    match args.command {
-        PolicyCommands::Schema => print_policy_schema(),
-        PolicyCommands::Validate(args) => validate_policy_document(&args.policy),
-    }
-}
-
-fn print_policy_schema() -> std::result::Result<(), String> {
-    let schema = schema_for!(PolicyDocument);
-    let json = serde_json::to_string_pretty(&schema)
-        .map_err(|error| format!("failed to serialize policy schema: {error}"))?;
-    println!("{json}");
-    Ok(())
-}
-
-fn validate_policy_document(policy: &str) -> std::result::Result<(), String> {
-    let policy = read_policy_document(policy)?;
-    policy_document_request(policy).map(|_| ())
-}
-
-impl InnerExecArgs {
-    fn into_exec_request(self) -> std::result::Result<ExecRequest, String> {
-        if self.command.is_empty() {
-            return Err("missing command".to_string());
-        }
-        ExecRequest::new(expand_path(self.cwd)?, self.command, Vec::new())
-            .map(|request| {
-                request
-                    .with_env_policy(EnvPolicy::Blocklist, Vec::new())
-                    .with_stdio_policy(self.stdio.into())
-            })
-            .map_err(|error| error.to_string())
-    }
-}
-
-impl ExecArgs {
-    fn into_exec_request(self) -> std::result::Result<ExecRequest, String> {
-        if let Some(policy) = self.policy {
-            if self.cwd.is_some()
-                || !self.allow_env.is_empty()
-                || !self.deny_env.is_empty()
-                || self.stdio != CliStdioPolicy::Inherit
-                || self.no_proc
-                || !self.command.is_empty()
-            {
-                return Err("--policy cannot be combined with direct exec arguments".to_string());
-            }
-            return policy_document_request(read_policy_document(&policy)?);
-        }
-
-        let cwd = self
-            .cwd
-            .map(expand_path)
-            .transpose()?
-            .unwrap_or_else(current_directory);
-        if self.command.is_empty() {
-            return Err("missing command".to_string());
-        }
-        let env_policy = if self.deny_env.is_empty() {
-            EnvPolicy::Allowlist
-        } else {
-            EnvPolicy::Blocklist
-        };
-        ExecRequest::new(cwd, self.command, self.allow_env)
-            .map(|request| {
-                request
-                    .with_env_policy(env_policy, self.deny_env)
-                    .with_stdio_policy(self.stdio.into())
-                    .with_proc_mode(if self.no_proc {
-                        ProcMode::Disabled
-                    } else {
-                        ProcMode::Default
-                    })
-            })
-            .map_err(|error| error.to_string())
-    }
-}
-
-fn current_directory() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
-fn read_policy_document(policy: &str) -> std::result::Result<PolicyDocument, String> {
-    let json = if policy == "-" {
-        let mut json = String::new();
-        std::io::stdin()
-            .read_to_string(&mut json)
-            .map_err(|error| format!("failed to read policy from stdin: {error}"))?;
-        json
-    } else {
-        let policy_path = expand_path(PathBuf::from(policy))?;
-        std::fs::read_to_string(&policy_path)
-            .map_err(|error| format!("failed to read policy {}: {error}", policy_path.display()))?
-    };
-    let value = serde_json::from_str::<serde_json::Value>(&json)
-        .map_err(|error| format!("failed to parse policy JSON: {error}"))?;
-    reject_unknown_policy_fields(&value)?;
-    serde_json::from_value(value).map_err(|error| format!("failed to parse policy JSON: {error}"))
-}
-
-fn reject_unknown_policy_fields(value: &serde_json::Value) -> std::result::Result<(), String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "policy JSON must be an object".to_string())?;
-    for key in object.keys() {
-        if !matches!(
-            key.as_str(),
-            "cwd" | "command" | "enabled" | "network" | "proc" | "filesystem" | "env" | "stdio"
-        ) {
-            return Err(format!("unknown policy field: {key}"));
-        }
-    }
-    Ok(())
-}
-
-fn policy_document_request(policy: PolicyDocument) -> std::result::Result<ExecRequest, String> {
-    let PolicyDocument {
-        cwd,
-        command,
-        sandbox,
-        stdio,
-    } = policy;
-    let (network_mode, proc_mode, filesystem_policy) = validate_sandbox_config(&sandbox)?;
-
-    let env = sandbox.env.unwrap_or(PolicyEnvironment {
-        allow: None,
-        deny: None,
-    });
-    let denied_env = env.deny.unwrap_or_default();
-    let (env_policy, allowed_env) = match env.allow {
-        Some(allowed_env) => (EnvPolicy::Allowlist, allowed_env),
-        None => (EnvPolicy::Blocklist, Vec::new()),
-    };
-    let cwd = cwd
-        .map(expand_path)
-        .transpose()?
-        .unwrap_or_else(current_directory);
-    ExecRequest::new(cwd, command, allowed_env)
-        .map(|request| {
-            request
-                .with_env_policy(env_policy, denied_env)
-                .with_stdio_policy(stdio.unwrap_or(CliStdioPolicy::Inherit).into())
-                .with_network_mode(network_mode)
-                .with_proc_mode(proc_mode)
-        })
-        .and_then(|request| request.with_filesystem_policy(filesystem_policy))
-        .map_err(|error| error.to_string())
-}
-
-fn validate_sandbox_config(
-    config: &SandboxConfig,
-) -> std::result::Result<(NetworkMode, ProcMode, FilesystemPolicy), String> {
-    if config.enabled == Some(false) {
-        return Err("policy enabled=false is not supported by heimdall-sandbox exec".to_string());
-    }
-
-    let network_mode = match config.network {
-        Some(SandboxNetwork::None) => NetworkMode::None,
-        Some(SandboxNetwork::Host) | None => NetworkMode::Host,
-    };
-    let proc_mode = match config.proc {
-        Some(SandboxProc::None) => ProcMode::Disabled,
-        Some(SandboxProc::Default) | None => ProcMode::Default,
-    };
-    let filesystem_policy = filesystem_policy(config.filesystem.as_ref())?;
-
-    Ok((network_mode, proc_mode, filesystem_policy))
-}
-
-fn expand_path(path: PathBuf) -> std::result::Result<PathBuf, String> {
-    let Some(path) = path.to_str() else {
-        return Ok(path);
-    };
-    shellexpand::full(path)
-        .map(|expanded| PathBuf::from(expanded.into_owned()))
-        .map_err(|error| format!("failed to expand path {path:?}: {error}"))
-}
-
-fn filesystem_policy(
-    filesystem: Option<&PolicyFilesystem>,
-) -> std::result::Result<FilesystemPolicy, String> {
-    let Some(filesystem) = filesystem else {
-        return Ok(FilesystemPolicy::default());
-    };
-    Ok(FilesystemPolicy::new(
-        filesystem.deny.clone().unwrap_or_default(),
-        filesystem.writable.clone().unwrap_or_default(),
-        filesystem.virtual_files.clone().unwrap_or_default(),
-    ))
 }
 
 /// Run the sandbox CLI and return the process exit code.
+///
+/// Parses arguments from `std::env::args`, runs the appropriate subcommand,
+/// and returns `0` on success or a non-zero exit code on failure.
 #[must_use]
 pub fn run() -> i32 {
     run_cli(Cli::parse_args())
 }
 
-/// Run CLI parsing and map clap parse errors to the sandbox misconfiguration code.
+/// Run CLI parsing from an explicit argument iterator.
+///
+/// Maps clap parse errors to the sandbox misconfiguration exit code.
 #[must_use]
 pub fn run_from<I, T>(args: I) -> i32
 where
@@ -417,14 +100,23 @@ where
 
 fn run_cli(cli: Cli) -> i32 {
     let Cli { command } = cli;
+
     if let Commands::Policy(args) = command {
-        return match run_policy_command(args) {
+        return match commands::policy::run_policy_command(args) {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("{error}");
                 SANDBOX_MISCONFIGURATION_EXIT_CODE
             }
         };
+    }
+
+    if let Commands::Setup(args) = command {
+        return commands::setup::run_setup_command(args);
+    }
+
+    if let Commands::PrivacyFilter(args) = command {
+        return commands::privacy_filter::run_privacy_filter_command(args);
     }
 
     if let Err(error) = heimdall_process_hardening::apply_process_hardening() {
@@ -452,8 +144,10 @@ mod tests {
     use std::path::PathBuf;
 
     use clap::Parser;
+    use heimdall_core::{EnvPolicy, ProcMode, StdioPolicy};
 
     use super::*;
+    use crate::policy::*;
 
     #[test]
     fn parses_valid_exec_invocation() {
@@ -652,7 +346,7 @@ mod tests {
 
         let request = policy_document_request(policy).expect("network isolation converts");
 
-        assert_eq!(request.network_mode(), NetworkMode::None);
+        assert_eq!(request.network_mode(), heimdall_core::NetworkMode::None);
         assert!(request.needs_isolation());
     }
 
@@ -716,14 +410,14 @@ mod tests {
 
         let error = policy_document_request(policy).expect_err("relative virtual path is rejected");
 
-        assert!(error.contains("filesystem.virtual"));
-        assert!(error.contains("must be absolute"));
+        assert!(error.to_string().contains("filesystem.virtual"));
+        assert!(error.to_string().contains("must be absolute"));
     }
 
     #[test]
     fn policy_schema_has_expected_shape() {
-        let schema =
-            serde_json::to_value(schema_for!(PolicyDocument)).expect("policy schema serializes");
+        let schema = serde_json::to_value(schemars::schema_for!(PolicyDocument))
+            .expect("policy schema serializes");
 
         assert_eq!(schema["additionalProperties"], false);
         assert!(schema["required"].as_array().is_some_and(|required| {
@@ -755,7 +449,7 @@ mod tests {
 
         let error = reject_unknown_policy_fields(&value).expect_err("unknown field is rejected");
 
-        assert!(error.contains("unknown policy field: bogus"));
+        assert!(error.to_string().contains("unknown policy field: bogus"));
     }
 
     #[test]
@@ -765,7 +459,7 @@ mod tests {
 
         let request = command.into_exec_request().expect("request converts");
 
-        assert_eq!(request.cwd(), current_directory());
+        assert_eq!(request.cwd(), current_directory().expect("cwd exists"));
     }
 
     #[test]
@@ -777,7 +471,7 @@ mod tests {
             .into_exec_request()
             .expect_err("command is required");
 
-        assert!(error.contains("missing command"));
+        assert!(error.to_string().contains("missing command"));
     }
 
     #[test]
@@ -796,7 +490,7 @@ mod tests {
             .into_exec_request()
             .expect_err("invalid cwd is rejected");
 
-        assert!(error.contains("invalid cwd"));
+        assert!(error.to_string().contains("invalid cwd"));
     }
 
     #[test]

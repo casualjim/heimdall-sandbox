@@ -1,0 +1,13 @@
+# Link the WebGPU Dawn dylib with a relative rpath so it finds the library
+# next to the installed binary instead of requiring DYLD_LIBRARY_PATH.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-args=-Wl,-rpath,@executable_path"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-args=-Wl,-rpath,@executable_path"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-args=-Wl,-rpath,$ORIGIN"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-args=-Wl,-rpath,$ORIGIN"]

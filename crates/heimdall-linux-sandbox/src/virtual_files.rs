@@ -66,7 +66,7 @@ impl<'a> BubblewrapResourcesBuilder<'a> {
     fn prepare(self) -> Result<BubblewrapResources> {
         let protected_placeholders = ProtectedPlaceholders::prepare(
             self.cwd,
-            &self.materialized.protected_targets,
+            self.materialized.protected_targets(),
             self.filesystem_policy.writable(),
         )?;
         let virtual_files =
@@ -158,9 +158,7 @@ fn create_virtual_file_data(index: usize) -> Result<File> {
     let file = File::create(&path).map_err(|error| {
         Error::sandbox_misconfiguration(format!("failed to create virtual file data: {error}"))
     })?;
-    std::fs::remove_file(&path).map_err(|error| {
-        Error::sandbox_misconfiguration(format!("failed to unlink virtual file data: {error}"))
-    })?;
+    let _ = std::fs::remove_file(&path);
     Ok(file)
 }
 

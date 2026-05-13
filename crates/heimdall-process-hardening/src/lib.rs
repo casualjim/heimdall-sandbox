@@ -76,6 +76,15 @@ fn disable_debug_attach() -> std::io::Result<()> {
 
 /// Arrange for a Linux child process to receive `SIGTERM` if its parent dies.
 ///
+/// # Race window
+///
+/// After `prctl(PR_SET_PDEATHSIG)` succeeds, this function checks whether the
+/// parent PID has already changed. There is an inherent TOCTOU race: the
+/// original parent could die and a new process could reuse the PID between the
+/// kernel registering the death signal and this userspace check. In practice
+/// this is extremely unlikely because PID recycling requires the PID allocator
+/// to wrap, but callers should be aware of the theoretical gap.
+///
 /// # Errors
 ///
 /// Returns the underlying OS error when `prctl(PR_SET_PDEATHSIG)` fails.

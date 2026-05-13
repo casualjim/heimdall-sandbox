@@ -7,6 +7,9 @@ use heimdall_sandbox_policy::{
 use crate::{Error, Result};
 
 /// Child stdio handling policy.
+///
+/// Controls how stdin, stdout, and stderr are connected between the sandbox
+/// parent process and the sandboxed child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioPolicy {
     /// Inherit stdin, stdout, and stderr from the sandbox process.
@@ -15,7 +18,31 @@ pub enum StdioPolicy {
     Piped,
 }
 
+impl std::str::FromStr for StdioPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "inherit" => Ok(Self::Inherit),
+            "piped" => Ok(Self::Piped),
+            _ => Err(format!("unknown stdio policy: {s}")),
+        }
+    }
+}
+
+impl std::fmt::Display for StdioPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inherit => formatter.write_str("inherit"),
+            Self::Piped => formatter.write_str("piped"),
+        }
+    }
+}
+
 /// Child environment filtering policy.
+///
+/// Determines which parent environment variables are inherited by the sandboxed
+/// child process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvPolicy {
     /// Pass only explicitly allowed parent environment variables.
@@ -24,7 +51,31 @@ pub enum EnvPolicy {
     Blocklist,
 }
 
+impl std::str::FromStr for EnvPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "allowlist" => Ok(Self::Allowlist),
+            "blocklist" => Ok(Self::Blocklist),
+            _ => Err(format!("unknown env policy: {s}")),
+        }
+    }
+}
+
+impl std::fmt::Display for EnvPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allowlist => formatter.write_str("allowlist"),
+            Self::Blocklist => formatter.write_str("blocklist"),
+        }
+    }
+}
+
 /// Structured child execution request independent from CLI parsing.
+///
+/// Built via `new` followed by builder methods. Validates that the working
+/// directory exists and that a command is provided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecRequest {
     cwd: PathBuf,
@@ -40,8 +91,6 @@ pub struct ExecRequest {
 
 impl ExecRequest {
     /// Create a validated execution request.
-    ///
-    /// # Errors
     ///
     /// Returns [`Error::MissingCommand`] when `argv` is empty and
     /// [`Error::InvalidCwd`] when `cwd` is not an existing directory.
@@ -70,14 +119,14 @@ impl ExecRequest {
         })
     }
 
-    /// Return a copy of this request using the provided stdio policy.
+    /// Set the child stdio handling policy.
     #[must_use]
     pub const fn with_stdio_policy(mut self, stdio_policy: StdioPolicy) -> Self {
         self.stdio_policy = stdio_policy;
         self
     }
 
-    /// Return a copy of this request using the provided environment policy and denied keys.
+    /// Set the environment policy and denied keys.
     #[must_use]
     pub fn with_env_policy(mut self, env_policy: EnvPolicy, denied_env: Vec<String>) -> Self {
         self.env_policy = env_policy;
@@ -85,7 +134,9 @@ impl ExecRequest {
         self
     }
 
-    /// Return a copy of this request using the provided allowed and denied environment keys.
+    /// Set both allowed and denied environment keys.
+    ///
+    /// Sets the policy to [`EnvPolicy::Allowlist`].
     #[must_use]
     pub fn with_env(mut self, allowed_env: Vec<String>, denied_env: Vec<String>) -> Self {
         self.allowed_env = allowed_env;
@@ -94,16 +145,14 @@ impl ExecRequest {
         self
     }
 
-    /// Return a copy of this request using the provided network mode.
+    /// Set the child network isolation mode.
     #[must_use]
     pub const fn with_network_mode(mut self, network_mode: NetworkMode) -> Self {
         self.network_mode = network_mode;
         self
     }
 
-    /// Return a copy of this request using the provided filesystem policy.
-    ///
-    /// # Errors
+    /// Set the filesystem sandbox policy.
     ///
     /// Returns an error when filesystem policy validation fails.
     pub fn with_filesystem_policy(mut self, filesystem_policy: FilesystemPolicy) -> Result<Self> {
@@ -112,14 +161,16 @@ impl ExecRequest {
         Ok(self)
     }
 
-    /// Return a copy of this request using the provided proc mount policy.
+    /// Set the `/proc` mount policy.
     #[must_use]
     pub const fn with_proc_mode(mut self, proc_mode: ProcMode) -> Self {
         self.proc_mode = proc_mode;
         self
     }
 
-    /// Return true when this request needs OS-level isolation.
+    /// Whether this request needs OS-level isolation.
+    ///
+    /// Returns `true` when network isolation is requested or filesystem policy is non-empty.
     #[must_use]
     pub fn needs_isolation(&self) -> bool {
         self.network_mode == NetworkMode::None || !self.filesystem_policy.is_empty()
@@ -181,8 +232,6 @@ impl ExecRequest {
 }
 
 /// Validate a child working directory.
-///
-/// # Errors
 ///
 /// Returns [`Error::InvalidCwd`] when the path is not an existing directory.
 pub fn validate_cwd(cwd: &Path) -> Result<()> {

@@ -248,7 +248,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
     fn add_policy_mounts(&mut self) {
         self.ro_bind(self.request.cwd, self.request.cwd);
-        for writable in &self.materialized.writable_targets {
+        for writable in self.materialized.writable_targets() {
             self.bind(writable, writable);
         }
 
@@ -261,14 +261,14 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
         let empty_file = self.resources.empty_file();
         let empty_dir = self.resources.empty_dir();
-        for denied in &self.materialized.deny_targets {
+        for denied in self.materialized.deny_targets() {
             if denied.is_dir() {
                 self.ro_bind(&empty_dir, denied);
             } else {
                 self.ro_bind(&empty_file, denied);
             }
         }
-        for protected in &self.materialized.protected_targets {
+        for protected in self.materialized.protected_targets() {
             let source = if protected.exists() && !protected.is_dir() {
                 &empty_file
             } else {
@@ -284,7 +284,8 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "failed to resolve current executable: {error}"
             ))
         })?;
-        self.ro_bind(&current_exe, Path::new("/heimdall-inner"));
+        let inner_exe = Self::inner_executable(&current_exe);
+        self.ro_bind(&inner_exe, Path::new("/heimdall-inner"));
         self.args.push("--chdir".into());
         self.args.push(self.request.cwd.as_os_str().to_os_string());
         if self.launcher.supports_argv0 {
@@ -302,6 +303,18 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.args
             .extend(self.request.argv.iter().map(OsString::from));
         Ok(())
+    }
+
+    fn inner_executable(current_exe: &Path) -> PathBuf {
+        let Some(parent) = current_exe.parent() else {
+            return current_exe.to_path_buf();
+        };
+        let candidate = parent.join("heimdall-sandbox-inner");
+        if candidate.is_file() {
+            candidate
+        } else {
+            current_exe.to_path_buf()
+        }
     }
 
     fn ro_bind(&mut self, source: &Path, destination: &Path) {
@@ -352,11 +365,7 @@ mod tests {
     use super::*;
 
     fn empty_materialized_policy() -> MaterializedFilesystemPolicy {
-        MaterializedFilesystemPolicy {
-            deny_targets: BTreeSet::new(),
-            writable_targets: BTreeSet::new(),
-            protected_targets: BTreeSet::new(),
-        }
+        MaterializedFilesystemPolicy::empty()
     }
 
     #[test]
@@ -589,11 +598,11 @@ mod tests {
         };
         let plan = request
             .into_plan_with_bwrap(
-                MaterializedFilesystemPolicy {
-                    deny_targets: BTreeSet::from([denied.clone()]),
-                    writable_targets: BTreeSet::from([cwd.clone()]),
-                    protected_targets: BTreeSet::new(),
-                },
+                MaterializedFilesystemPolicy::new(
+                    BTreeSet::from([denied.clone()]),
+                    BTreeSet::from([cwd.clone()]),
+                    BTreeSet::new(),
+                ),
                 PathBuf::from("/usr/bin/bwrap"),
             )
             .expect("plan builds");

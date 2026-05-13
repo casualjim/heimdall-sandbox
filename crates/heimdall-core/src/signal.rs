@@ -5,9 +5,17 @@ use crate::{Error, Result};
 
 pub(crate) struct SignalForwarding {
     state: Arc<Mutex<SignalState>>,
-    target_process_group: bool,
+    target: SignalTarget,
     handle: signal_hook::iterator::Handle,
     thread: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy)]
+enum SignalTarget {
+    Child,
+    ProcessGroup,
+    #[cfg(target_os = "linux")]
+    BubblewrapPayload,
 }
 
 #[derive(Default)]
@@ -21,14 +29,19 @@ struct SignalState {
 
 impl SignalForwarding {
     pub(crate) fn install() -> Result<Self> {
-        Self::install_with_target(false)
+        Self::install_with_target(SignalTarget::Child)
     }
 
     pub(crate) fn install_for_process_group() -> Result<Self> {
-        Self::install_with_target(true)
+        Self::install_with_target(SignalTarget::ProcessGroup)
     }
 
-    fn install_with_target(target_process_group: bool) -> Result<Self> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn install_for_bubblewrap_payload() -> Result<Self> {
+        Self::install_with_target(SignalTarget::BubblewrapPayload)
+    }
+
+    fn install_with_target(target: SignalTarget) -> Result<Self> {
         let mut signals = signal_hook::iterator::Signals::new([
             libc::SIGHUP,
             libc::SIGINT,
@@ -52,7 +65,7 @@ impl SignalForwarding {
                         continue;
                     }
                 };
-                if let Err(error) = forward_signal(child_pid, signal, target_process_group) {
+                if let Err(error) = forward_signal(child_pid, signal, target) {
                     let mut state = thread_state
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -63,7 +76,7 @@ impl SignalForwarding {
 
         Ok(Self {
             state,
-            target_process_group,
+            target,
             handle,
             thread: Some(thread),
         })
@@ -80,7 +93,7 @@ impl SignalForwarding {
             std::mem::take(&mut state.pending_signals)
         };
         for signal in pending {
-            forward_signal(pid, signal, self.target_process_group).map_err(Error::Hardening)?;
+            forward_signal(pid, signal, self.target).map_err(Error::Hardening)?;
         }
         Ok(())
     }
@@ -110,16 +123,65 @@ impl SignalForwarding {
     }
 }
 
-fn forward_signal(pid: i32, signal: i32, target_process_group: bool) -> std::io::Result<()> {
-    let target = if target_process_group { -pid } else { pid };
-    // SAFETY: `target` is captured from the successfully spawned child process and `signal`
+fn forward_signal(pid: i32, signal: i32, target: SignalTarget) -> std::io::Result<()> {
+    match target {
+        SignalTarget::Child => kill_pid(pid, signal),
+        SignalTarget::ProcessGroup => kill_pid(-pid, signal),
+        #[cfg(target_os = "linux")]
+        SignalTarget::BubblewrapPayload => forward_signal_to_bubblewrap_payload(pid, signal),
+    }
+}
+
+fn kill_pid(pid: i32, signal: i32) -> std::io::Result<()> {
+    // SAFETY: `pid` is captured from the successfully spawned child process and `signal`
     // comes from the signal-hook iterator for installed signals.
-    let result = unsafe { libc::kill(target, signal) };
+    let result = unsafe { libc::kill(pid, signal) };
     if result == 0 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn forward_signal_to_bubblewrap_payload(bubblewrap_pid: i32, signal: i32) -> std::io::Result<()> {
+    let mut descendants = Vec::new();
+    append_descendants(bubblewrap_pid, &mut descendants)?;
+    if descendants.is_empty() {
+        return kill_pid(bubblewrap_pid, signal);
+    }
+    for pid in descendants {
+        kill_pid(pid, signal)?;
+    }
+    if signal == libc::SIGQUIT {
+        kill_pid(bubblewrap_pid, signal)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn append_descendants(pid: i32, descendants: &mut Vec<i32>) -> std::io::Result<()> {
+    for child in child_pids(pid)? {
+        descendants.push(child);
+        append_descendants(child, descendants)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn child_pids(pid: i32) -> std::io::Result<Vec<i32>> {
+    let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))?;
+    children
+        .split_whitespace()
+        .map(|child| {
+            child.parse::<i32>().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid child pid {child}: {error}"),
+                )
+            })
+        })
+        .collect()
 }
 
 impl Drop for SignalForwarding {

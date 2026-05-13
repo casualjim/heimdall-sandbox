@@ -46,31 +46,33 @@ impl Error {
         Self::MissingCommand
     }
 
-    /// Construct an invalid cwd error.
+    /// Construct an invalid cwd error from the rejected path.
     #[must_use]
     pub fn invalid_cwd(cwd: PathBuf) -> Self {
         Self::InvalidCwd(cwd)
     }
 
-    /// Construct a hardening error.
+    /// Wrap a process hardening I/O error.
     #[must_use]
     pub fn hardening(error: std::io::Error) -> Self {
         Self::Hardening(error)
     }
 
-    /// Construct a spawn error.
+    /// Wrap a child spawn I/O error.
     #[must_use]
     pub fn spawn(error: std::io::Error) -> Self {
         Self::Spawn(error)
     }
 
-    /// Construct a sandbox misconfiguration error.
+    /// Construct a sandbox misconfiguration error with a descriptive message.
     #[must_use]
     pub fn sandbox_misconfiguration(message: impl Into<String>) -> Self {
         Self::SandboxMisconfiguration(message.into())
     }
 
     /// Return the documented process exit code for this error.
+    ///
+    /// All sandbox errors currently map to [`SANDBOX_MISCONFIGURATION_EXIT_CODE`].
     #[must_use]
     pub const fn exit_code(&self) -> i32 {
         match self {
