@@ -11,7 +11,8 @@ case "${TARGET_TRIPLE}" in
     LIB_NAME="libwebgpu_dawn.dylib"
     ;;
   *-unknown-linux-gnu)
-    LIB_NAME="libwebgpu_dawn.so"
+    # Linux links ONNX Runtime/WebGPU without a sidecar Dawn library in release artifacts.
+    exit 0
     ;;
   *)
     echo "unsupported target for WebGPU Dawn packaging: ${TARGET_TRIPLE}" >&2
@@ -28,18 +29,25 @@ CANDIDATES=(
   "target/${TARGET_TRIPLE}/dist/${LIB_NAME}"
   "target/${TARGET_TRIPLE}/release/${LIB_NAME}"
   "target/release/${LIB_NAME}"
+  "${HOME}/.cache/ort.pyke.io/dfbin/${TARGET_TRIPLE}"
 )
 
 LIB_PATH=""
 for candidate in "${CANDIDATES[@]}"; do
-  if [[ -e "${candidate}" ]]; then
+  if [[ -f "${candidate}" || -L "${candidate}" ]]; then
     LIB_PATH="${candidate}"
     break
+  fi
+  if [[ -d "${candidate}" ]]; then
+    LIB_PATH="$(find "${candidate}" -name "${LIB_NAME}" -print -quit)"
+    if [[ -n "${LIB_PATH}" ]]; then
+      break
+    fi
   fi
 done
 
 if [[ -z "${LIB_PATH}" ]]; then
-  LIB_PATH="$(find target -path "*/${LIB_NAME}" -print -quit)"
+  LIB_PATH="$(find target "${HOME}/.cache/ort.pyke.io" -path "*/${LIB_NAME}" -print -quit 2>/dev/null)"
 fi
 
 if [[ -z "${LIB_PATH}" || ! -e "${LIB_PATH}" ]]; then
