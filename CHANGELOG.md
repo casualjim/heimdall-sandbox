@@ -1,8 +1,18 @@
+## [0.1.16] - 2026-05-13
+
+### ⚙️ Miscellaneous Tasks
+
+- Build x86 release on Ubuntu 24.04
 ## [0.1.15] - 2026-05-13
 
 ### 🐛 Bug Fixes
 
 - Limit WebGPU provider to macOS builds
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.15 [ci skip]
+- Release version 0.1.15
 ## [0.1.14] - 2026-05-13
 
 ### 🐛 Bug Fixes
