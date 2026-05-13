@@ -1,8 +1,18 @@
+## [0.1.15] - 2026-05-13
+
+### 🐛 Bug Fixes
+
+- Limit WebGPU provider to macOS builds
 ## [0.1.14] - 2026-05-13
 
 ### 🐛 Bug Fixes
 
 - Avoid Linux Dawn sidecar packaging
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.14 [ci skip]
+- Release version 0.1.14
 ## [0.1.13] - 2026-05-13
 
 ### ⚙️ Miscellaneous Tasks
