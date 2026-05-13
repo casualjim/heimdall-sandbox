@@ -1,8 +1,18 @@
+## [0.1.11] - 2026-05-13
+
+### 🚀 Features
+
+- Add ONNX privacy filter (#3)
 ## [0.1.10] - 2026-05-08
 
 ### 🐛 Bug Fixes
 
 - Avoid crates.io API checks during publish
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.10 [ci skip]
+- Release version 0.1.10
 ## [0.1.9] - 2026-05-08
 
 ### 🐛 Bug Fixes
