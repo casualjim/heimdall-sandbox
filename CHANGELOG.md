@@ -1,8 +1,22 @@
+## [0.1.12] - 2026-05-13
+
+### 🐛 Bug Fixes
+
+- Package WebGPU Dawn release library
+
+### 🧪 Testing
+
+- Bound privacy filter overflow tests
 ## [0.1.11] - 2026-05-13
 
 ### 🚀 Features
 
 - Add ONNX privacy filter (#3)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.11 [ci skip]
+- Release version 0.1.11
 ## [0.1.10] - 2026-05-08
 
 ### 🐛 Bug Fixes
