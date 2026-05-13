@@ -1,8 +1,15 @@
+## [0.1.14] - 2026-05-13
+
+### 🐛 Bug Fixes
+
+- Avoid Linux Dawn sidecar packaging
 ## [0.1.13] - 2026-05-13
 
 ### ⚙️ Miscellaneous Tasks
 
 - Allow custom release workflow packaging
+- Update changelog for v0.1.13 [ci skip]
+- Release version 0.1.13
 ## [0.1.12] - 2026-05-13
 
 ### 🐛 Bug Fixes
