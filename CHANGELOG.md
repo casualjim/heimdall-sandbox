@@ -1,3 +1,8 @@
+## [0.1.13] - 2026-05-13
+
+### ⚙️ Miscellaneous Tasks
+
+- Allow custom release workflow packaging
 ## [0.1.12] - 2026-05-13
 
 ### 🐛 Bug Fixes
@@ -7,6 +12,11 @@
 ### 🧪 Testing
 
 - Bound privacy filter overflow tests
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.12 [ci skip]
+- Release version 0.1.12
 ## [0.1.11] - 2026-05-13
 
 ### 🚀 Features
