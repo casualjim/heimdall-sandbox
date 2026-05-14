@@ -1,8 +1,15 @@
+## [0.1.21] - 2026-05-14
+
+### ⚙️ Miscellaneous Tasks
+
+- Restore Linux arm64 release target
 ## [0.1.20] - 2026-05-14
 
 ### ⚙️ Miscellaneous Tasks
 
 - Publish npm packages for built targets
+- Update changelog for v0.1.20 [ci skip]
+- Release version 0.1.20
 ## [0.1.19] - 2026-05-14
 
 ### ⚙️ Miscellaneous Tasks
