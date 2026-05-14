@@ -7,6 +7,10 @@ ARCHIVE="${ARTIFACT_DIR}.tar.xz"
 CHECKSUM="${ARCHIVE}.sha256"
 
 case "${TARGET_TRIPLE}" in
+  aarch64-unknown-linux-gnu)
+    echo "skipping WebGPU Dawn packaging for CPU-only Linux arm64 build"
+    exit 0
+    ;;
   *-apple-darwin)
     LIB_NAME="libwebgpu_dawn.dylib"
     ;;

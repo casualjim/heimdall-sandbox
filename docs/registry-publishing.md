@@ -28,7 +28,7 @@ Each trusted publisher entry should point at this GitHub repository and the reus
 
 Platform npm packages publish first. The main package publishes last and depends on the platform packages as optional dependencies at the same release version.
 
-Do not remove `@casualjim/heimdall-sandbox-linux-arm64` only because privacy-filter WebGPU prebuilt binaries are unavailable for Linux arm64. Linux arm64 remains a supported sandbox/package target; the limitation is specifically the upstream ONNX Runtime/Dawn WebGPU native artifact availability for privacy-filter acceleration.
+Do not remove `@casualjim/heimdall-sandbox-linux-arm64` only because privacy-filter WebGPU prebuilt binaries are unavailable for Linux arm64. Linux arm64 remains a supported sandbox/package target, but its release binary is built without WebGPU and must not package `libwebgpu_dawn.so`. The limitation is specifically the upstream ONNX Runtime/Dawn WebGPU native artifact availability for privacy-filter acceleration.
 
 ## Local validation
 

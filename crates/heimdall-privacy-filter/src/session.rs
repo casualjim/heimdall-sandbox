@@ -1,5 +1,7 @@
 use ndarray::ArrayD;
-use ort::execution_providers::{CPUExecutionProvider, WebGPUExecutionProvider};
+use ort::execution_providers::CPUExecutionProvider;
+#[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+use ort::execution_providers::WebGPUExecutionProvider;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
@@ -16,6 +18,25 @@ const ONNX_INTRA_THREADS: usize = 4;
 
 fn onnx_error(error: impl std::fmt::Display) -> Error {
     Error::Onnx(error.to_string())
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+fn configure_webgpu(
+    builder: ort::session::builder::SessionBuilder,
+) -> Result<ort::session::builder::SessionBuilder> {
+    builder
+        .with_execution_providers([WebGPUExecutionProvider::default().build()])
+        .map_err(onnx_error)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn configure_webgpu(
+    builder: ort::session::builder::SessionBuilder,
+) -> Result<ort::session::builder::SessionBuilder> {
+    let _ = builder;
+    Err(Error::Onnx(
+        "WebGPU execution provider is unavailable in Linux arm64 builds; use CPU or provide a Linux arm64 ONNX Runtime/Dawn WebGPU build".to_string(),
+    ))
 }
 
 /// Thin direct wrapper around an ONNX Runtime session for OpenAI privacy-filter.
@@ -42,9 +63,7 @@ impl PrivacyOnnxSession {
             PrivacyExecutionProvider::Cpu => builder
                 .with_execution_providers([CPUExecutionProvider::default().build()])
                 .map_err(onnx_error)?,
-            PrivacyExecutionProvider::WebGpu => builder
-                .with_execution_providers([WebGPUExecutionProvider::default().build()])
-                .map_err(onnx_error)?,
+            PrivacyExecutionProvider::WebGpu => configure_webgpu(builder)?,
         };
 
         let session = builder.commit_from_file(model_path).map_err(onnx_error)?;

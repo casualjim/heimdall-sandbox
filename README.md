@@ -35,7 +35,7 @@ npm (macOS Apple Silicon, Linux x64, and Linux arm64):
 npm install -g @casualjim/heimdall-sandbox
 ```
 
-Linux arm64 remains a supported sandbox/package target. The privacy-filter WebGPU execution provider currently depends on upstream ONNX Runtime/Dawn prebuilt artifacts that are not available for Linux arm64, so Linux arm64 releases must not be removed but need a source-built or vendored WebGPU runtime before WebGPU privacy-filter acceleration can work there.
+Linux arm64 remains a supported sandbox/package target, but Linux arm64 releases are built without WebGPU. The privacy-filter WebGPU execution provider currently depends on upstream ONNX Runtime/Dawn prebuilt artifacts that are not available for Linux arm64, so Linux arm64 uses the CPU execution provider unless a source-built or vendored Linux arm64 WebGPU runtime is added.
 
 Cargo registry:
 
