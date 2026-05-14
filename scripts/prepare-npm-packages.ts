@@ -120,13 +120,18 @@ function chmodExecutable(path: string, mode = statSync(path).mode): void {
   chmodSync(path, mode | 0o111);
 }
 
-function findArchive(artifactsDir: string, target: string): string {
+function findArchivePath(artifactsDir: string, target: string): string | undefined {
   const archiveName = `${BINARY}-${target}.tar.xz`;
   const matches = findFiles(artifactsDir, (path) => basename(path) === archiveName).sort();
-  if (matches.length === 0) {
-    throw new Error(`missing cargo-dist archive ${archiveName} under ${artifactsDir}`);
-  }
   return matches[0];
+}
+
+function findArchive(artifactsDir: string, target: string): string {
+  const archivePath = findArchivePath(artifactsDir, target);
+  if (!archivePath) {
+    throw new Error(`missing cargo-dist archive ${BINARY}-${target}.tar.xz under ${artifactsDir}`);
+  }
+  return archivePath;
 }
 
 function findFiles(root: string, predicate: (path: string) => boolean): string[] {
@@ -189,11 +194,11 @@ function createPlatformPackage(outDir: string, target: string, meta: TargetMetad
   return packageDir;
 }
 
-function createMainPackage(outDir: string, version: string): string {
+function createMainPackage(outDir: string, version: string, targets: Record<string, TargetMetadata>): string {
   const packageDir = join(outDir, 'heimdall-sandbox');
   const binDir = join(packageDir, 'bin');
   mkdirSync(binDir, { recursive: true });
-  const optionalDependencies = Object.fromEntries(Object.values(TARGETS).map((meta) => [meta.package, version]));
+  const optionalDependencies = Object.fromEntries(Object.values(targets).map((meta) => [meta.package, version]));
 
   writeJson(join(packageDir, 'package.json'), {
     name: PACKAGE,
@@ -213,11 +218,7 @@ function createMainPackage(outDir: string, version: string): string {
 const { spawnSync } = require('node:child_process');
 const process = require('node:process');
 
-const packages = {
-  'linux:x64': '@casualjim/heimdall-sandbox-linux-x64',
-  'linux:arm64': '@casualjim/heimdall-sandbox-linux-arm64',
-  'darwin:arm64': '@casualjim/heimdall-sandbox-darwin-arm64',
-};
+const packages = ${JSON.stringify(Object.fromEntries(Object.values(targets).map((meta) => [`${meta.os}:${meta.cpu}`, meta.package])), null, 2)};
 
 const key = \`${'${process.platform}:${process.arch}'}\`;
 const packageName = packages[key];
@@ -280,8 +281,11 @@ function main(): void {
   }
   mkdirSync(args.outDir, { recursive: true });
 
-  const packageDirs = Object.entries(TARGETS).map(([target, meta]) => createPlatformPackage(args.outDir, target, meta, version, artifactsDir));
-  packageDirs.push(createMainPackage(args.outDir, version));
+  const targets = Object.fromEntries(
+    Object.entries(TARGETS).filter(([target]) => !artifactsDir || existsSync(findArchivePath(artifactsDir, target))),
+  );
+  const packageDirs = Object.entries(targets).map(([target, meta]) => createPlatformPackage(args.outDir, target, meta, version, artifactsDir));
+  packageDirs.push(createMainPackage(args.outDir, version, targets));
 
   if (args.packDryRun) {
     for (const packageDir of packageDirs) {

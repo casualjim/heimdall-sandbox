@@ -19,11 +19,18 @@ OUT_DIR="${OUT_DIR:-target/npm-packages}"
 
 node scripts/prepare-npm-packages.ts --version "${VERSION}" --artifacts-dir "${ARTIFACTS_DIR}" --out-dir "${OUT_DIR}" --pack-dry-run
 
-PACKAGES=(
-  "heimdall-sandbox-linux-x64:@casualjim/heimdall-sandbox-linux-x64"
-  "heimdall-sandbox-linux-arm64:@casualjim/heimdall-sandbox-linux-arm64"
-  "heimdall-sandbox-darwin-arm64:@casualjim/heimdall-sandbox-darwin-arm64"
-  "heimdall-sandbox:@casualjim/heimdall-sandbox"
+mapfile -t PACKAGES < <(
+  node - "${OUT_DIR}" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const outDir = process.argv[2];
+for (const dir of fs.readdirSync(outDir)) {
+  const manifest = path.join(outDir, dir, 'package.json');
+  if (fs.existsSync(manifest)) {
+    console.log(`${dir}:${JSON.parse(fs.readFileSync(manifest, 'utf8')).name}`);
+  }
+}
+NODE
 )
 
 npm_version_exists() {
