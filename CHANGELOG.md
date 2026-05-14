@@ -1,8 +1,15 @@
+## [0.1.22] - 2026-05-14
+
+### ⚙️ Miscellaneous Tasks
+
+- Build Linux arm64 without WebGPU
 ## [0.1.21] - 2026-05-14
 
 ### ⚙️ Miscellaneous Tasks
 
 - Restore Linux arm64 release target
+- Update changelog for v0.1.21 [ci skip]
+- Release version 0.1.21
 ## [0.1.20] - 2026-05-14
 
 ### ⚙️ Miscellaneous Tasks
