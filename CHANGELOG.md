@@ -1,8 +1,15 @@
+## [0.1.18] - 2026-05-14
+
+### 🐛 Bug Fixes
+
+- Restore WebGPU support on all targets
 ## [0.1.17] - 2026-05-13
 
 ### ⚙️ Miscellaneous Tasks
 
 - Publish privacy filter crate before CLI
+- Update changelog for v0.1.17 [ci skip]
+- Release version 0.1.17
 ## [0.1.16] - 2026-05-13
 
 ### ⚙️ Miscellaneous Tasks
