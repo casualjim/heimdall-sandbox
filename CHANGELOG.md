@@ -1,8 +1,18 @@
+## [0.1.19] - 2026-05-14
+
+### ⚙️ Miscellaneous Tasks
+
+- Release only WebGPU-supported Linux target
 ## [0.1.18] - 2026-05-14
 
 ### 🐛 Bug Fixes
 
 - Restore WebGPU support on all targets
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.18 [ci skip]
+- Release version 0.1.18
 ## [0.1.17] - 2026-05-13
 
 ### ⚙️ Miscellaneous Tasks
