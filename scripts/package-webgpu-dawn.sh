@@ -11,8 +11,7 @@ case "${TARGET_TRIPLE}" in
     LIB_NAME="libwebgpu_dawn.dylib"
     ;;
   *-unknown-linux-gnu)
-    # Linux links ONNX Runtime/WebGPU without a sidecar Dawn library in release artifacts.
-    exit 0
+    LIB_NAME="libwebgpu_dawn.so"
     ;;
   *)
     echo "unsupported target for WebGPU Dawn packaging: ${TARGET_TRIPLE}" >&2

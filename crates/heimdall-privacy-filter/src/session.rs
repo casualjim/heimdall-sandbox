@@ -1,7 +1,5 @@
 use ndarray::ArrayD;
-use ort::execution_providers::CPUExecutionProvider;
-#[cfg(target_os = "macos")]
-use ort::execution_providers::WebGPUExecutionProvider;
+use ort::execution_providers::{CPUExecutionProvider, WebGPUExecutionProvider};
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
@@ -18,24 +16,6 @@ const ONNX_INTRA_THREADS: usize = 4;
 
 fn onnx_error(error: impl std::fmt::Display) -> Error {
     Error::Onnx(error.to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn webgpu_builder(
-    builder: ort::session::builder::SessionBuilder,
-) -> Result<ort::session::builder::SessionBuilder> {
-    builder
-        .with_execution_providers([WebGPUExecutionProvider::default().build()])
-        .map_err(onnx_error)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn webgpu_builder(
-    _builder: ort::session::builder::SessionBuilder,
-) -> Result<ort::session::builder::SessionBuilder> {
-    Err(Error::Onnx(
-        "WebGPU execution provider is only available in macOS release builds".to_string(),
-    ))
 }
 
 /// Thin direct wrapper around an ONNX Runtime session for OpenAI privacy-filter.
@@ -62,7 +42,9 @@ impl PrivacyOnnxSession {
             PrivacyExecutionProvider::Cpu => builder
                 .with_execution_providers([CPUExecutionProvider::default().build()])
                 .map_err(onnx_error)?,
-            PrivacyExecutionProvider::WebGpu => webgpu_builder(builder)?,
+            PrivacyExecutionProvider::WebGpu => builder
+                .with_execution_providers([WebGPUExecutionProvider::default().build()])
+                .map_err(onnx_error)?,
         };
 
         let session = builder.commit_from_file(model_path).map_err(onnx_error)?;
