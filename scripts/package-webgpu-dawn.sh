@@ -2,9 +2,11 @@
 set -euo pipefail
 
 TARGET_TRIPLE="${1:?target triple required}"
+MANIFEST="${2:-dist-manifest.json}"
 ARTIFACT_DIR="target/distrib/heimdall-sandbox-${TARGET_TRIPLE}"
 ARCHIVE="${ARTIFACT_DIR}.tar.xz"
 CHECKSUM="${ARCHIVE}.sha256"
+ARCHIVE_BASENAME="$(basename "${ARCHIVE}")"
 
 case "${TARGET_TRIPLE}" in
   aarch64-unknown-linux-gnu)
@@ -28,11 +30,11 @@ if [[ ! -d "${ARTIFACT_DIR}" ]]; then
   exit 1
 fi
 
+# The dylib is next to the binary in the build output.
 CANDIDATES=(
   "target/${TARGET_TRIPLE}/dist/${LIB_NAME}"
   "target/${TARGET_TRIPLE}/release/${LIB_NAME}"
   "target/release/${LIB_NAME}"
-  "${HOME}/.cache/ort.pyke.io/dfbin/${TARGET_TRIPLE}"
 )
 
 LIB_PATH=""
@@ -41,17 +43,7 @@ for candidate in "${CANDIDATES[@]}"; do
     LIB_PATH="${candidate}"
     break
   fi
-  if [[ -d "${candidate}" ]]; then
-    LIB_PATH="$(find "${candidate}" -name "${LIB_NAME}" -print -quit)"
-    if [[ -n "${LIB_PATH}" ]]; then
-      break
-    fi
-  fi
 done
-
-if [[ -z "${LIB_PATH}" ]]; then
-  LIB_PATH="$(find target "${HOME}/.cache/ort.pyke.io" -path "*/${LIB_NAME}" -print -quit 2>/dev/null)"
-fi
 
 if [[ -z "${LIB_PATH}" || ! -e "${LIB_PATH}" ]]; then
   echo "missing ${LIB_NAME}; searched target build outputs" >&2
@@ -60,11 +52,21 @@ fi
 
 cp -L "${LIB_PATH}" "${ARTIFACT_DIR}/${LIB_NAME}"
 
+# Rebuild the archive with the dylib included.
 tar -C target/distrib -cJf "${ARCHIVE}" "$(basename "${ARTIFACT_DIR}")"
 
+# Recompute the checksum.
 if command -v sha256sum >/dev/null 2>&1; then
   HASH="$(sha256sum "${ARCHIVE}" | awk '{print $1}')"
 else
   HASH="$(shasum -a 256 "${ARCHIVE}" | awk '{print $1}')"
 fi
-printf '%s *%s\n' "${HASH}" "$(basename "${ARCHIVE}")" > "${CHECKSUM}"
+printf '%s *%s\n' "${HASH}" "${ARCHIVE_BASENAME}" > "${CHECKSUM}"
+
+# Patch the dist manifest with the new checksum so downstream consumers
+# (Homebrew formula, upload list) stay consistent.
+if [[ -f "${MANIFEST}" ]] && command -v jq >/dev/null 2>&1; then
+  jq --arg archive "${ARCHIVE_BASENAME}" --arg hash "${HASH}" \
+    'if .artifacts[$archive].checksums.sha256 then .artifacts[$archive].checksums.sha256 = $hash else . end' \
+    "${MANIFEST}" > "${MANIFEST}.tmp" && mv "${MANIFEST}.tmp" "${MANIFEST}"
+fi
