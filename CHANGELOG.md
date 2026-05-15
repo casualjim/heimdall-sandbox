@@ -1,8 +1,19 @@
+## [heimdall-sandbox-v0.1.23] - 2026-05-15
+
+### 🐛 Bug Fixes
+
+- Patch dist manifest checksum after WebGPU Dawn repackaging
+
+### ⚙️ Miscellaneous Tasks
+
+- Release version 0.1.23
 ## [0.1.22] - 2026-05-14
 
 ### ⚙️ Miscellaneous Tasks
 
 - Build Linux arm64 without WebGPU
+- Update changelog for v0.1.22 [ci skip]
+- Release version 0.1.22
 ## [0.1.21] - 2026-05-14
 
 ### ⚙️ Miscellaneous Tasks
