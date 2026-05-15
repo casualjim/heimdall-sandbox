@@ -147,7 +147,7 @@ function findFiles(root: string, predicate: (path: string) => boolean): string[]
   return matches;
 }
 
-function extractBinary(archive: string, destination: string): void {
+function extractBinary(archive: string, destination: string, extras?: string[]): void {
   const tmp = mkdtempSync(join(tmpdir(), 'heimdall-npm-'));
   try {
     spawnChecked('tar', ['-xf', archive, '-C', tmp]);
@@ -157,6 +157,18 @@ function extractBinary(archive: string, destination: string): void {
     }
     copyFileSync(candidates[0], destination);
     chmodExecutable(destination);
+
+    if (extras) {
+      const binDir = join(destination, '..');
+      for (const extra of extras) {
+        const extraCandidates = findFiles(tmp, (p) => basename(p) === extra);
+        if (extraCandidates.length > 0) {
+          const extraDest = join(binDir, extra);
+          copyFileSync(extraCandidates[0], extraDest);
+          chmodExecutable(extraDest);
+        }
+      }
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -175,7 +187,9 @@ function createPlatformPackage(outDir: string, target: string, meta: TargetMetad
   if (!artifactsDir) {
     writeExecutable(binaryPath, "#!/usr/bin/env sh\necho 'placeholder binary for npm package dry-run validation'\n");
   } else {
-    extractBinary(findArchive(artifactsDir, target), binaryPath);
+    const dylibName = target.includes('apple-darwin') ? 'libwebgpu_dawn.dylib' : target.includes('linux') && target.includes('x86_64') ? 'libwebgpu_dawn.so' : undefined;
+    const extras = dylibName ? [dylibName] : undefined;
+    extractBinary(findArchive(artifactsDir, target), binaryPath, extras);
   }
 
   writeJson(join(packageDir, 'package.json'), {
