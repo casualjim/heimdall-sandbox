@@ -1,8 +1,18 @@
+## [0.1.27] - 2026-05-15
+
+### 🚀 Features
+
+- *(npm)* Include Dawn dylib in platform packages
 ## [0.1.26] - 2026-05-15
 
 ### 🐛 Bug Fixes
 
 - Install Dawn dylib before pkgshare snatches leftover files
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.26 [ci skip]
+- Release version 0.1.26
 ## [0.1.25] - 2026-05-15
 
 ### 🚀 Features
