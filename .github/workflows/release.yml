@@ -150,7 +150,7 @@ jobs:
           echo "dist ran successfully"
       - name: Package WebGPU Dawn library
         shell: bash
-        run: scripts/package-webgpu-dawn.sh "${{ join(matrix.targets, '') }}"
+        run: scripts/package-webgpu-dawn.sh "${{ join(matrix.targets, '') }}" dist-manifest.json
       - name: Attest
         uses: actions/attest-build-provenance@v3
         with:

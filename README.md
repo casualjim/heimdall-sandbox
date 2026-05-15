@@ -43,6 +43,14 @@ Cargo registry:
 cargo install heimdall-sandbox
 ```
 
+Cargo installs only the executable. On platforms where Heimdall links the ONNX Runtime WebGPU provider, the installed binary also needs the Dawn sidecar library (`libwebgpu_dawn.dylib` on macOS, `libwebgpu_dawn.so` on Linux) next to the executable or in another runtime linker search path. Prefer Homebrew, the shell installer, or npm for WebGPU-capable installs; those release packages are built with cargo-dist and include the sidecar library.
+
+If a Cargo-installed binary fails with a missing `libwebgpu_dawn` error, copy the library from the build output next to the installed executable, for example on macOS:
+
+```sh
+cp target/release/libwebgpu_dawn.dylib ~/.cargo/bin/
+```
+
 ## Quick start
 
 Run a command inside the sandbox:
