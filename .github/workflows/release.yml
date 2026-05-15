@@ -306,6 +306,13 @@ jobs:
           persist-credentials: true
           repository: "casualjim/homebrew-taps"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Checkout source repo for scripts
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          repository: casualjim/heimdall-sandbox
+          ref: ${{ github.sha }}
+          path: source-repo
       # So we have access to the formula
       - name: Fetch homebrew formulae
         uses: actions/download-artifact@v7
@@ -329,6 +336,9 @@ jobs:
             brew update
             # We avoid reformatting user-provided data such as the app description and homepage.
             brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+
+            # Patch the formula to install the WebGPU Dawn shared library and add rpath.
+            ruby "${GITHUB_WORKSPACE}/source-repo/scripts/patch-homebrew-formula.rb" "Formula/${filename}" || true
 
             git add "Formula/${filename}"
             git commit -m "${name} ${version}"
