@@ -1,8 +1,18 @@
+## [0.1.26] - 2026-05-15
+
+### 🐛 Bug Fixes
+
+- Install Dawn dylib before pkgshare snatches leftover files
 ## [0.1.25] - 2026-05-15
 
 ### 🚀 Features
 
 - *(homebrew)* Auto-patch formula to install Dawn dylib and add rpath
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.25 [ci skip]
+- Release version 0.1.25
 ## [0.1.24] - 2026-05-15
 
 ### ⚙️ Miscellaneous Tasks
