@@ -20,11 +20,12 @@ patch = <<~PATCH
     end
 PATCH
 
-# Find the closing `  end` of the install method (right before `end` of the class)
-if formula.sub!(/\n(  end\nend\n)/m, "\n" + patch + "\n" + "\\1")
+# Insert BEFORE the doc_files/leftover_contents block so the dylib gets
+# lib.install'd before pkgshare.install snatches it up.
+if formula.sub!(/(    # Homebrew will automatically)/m, patch + "\n    \\1")
   File.write(path, formula)
   puts "patched #{path}"
 else
-  warn "could not find install method end in #{path}"
+  warn "could not find doc_files anchor in #{path}"
   exit 1
 end
