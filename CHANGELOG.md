@@ -1,3 +1,14 @@
+## [0.1.25] - 2026-05-15
+
+### 🚀 Features
+
+- *(homebrew)* Auto-patch formula to install Dawn dylib and add rpath
+## [0.1.24] - 2026-05-15
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.24 [ci skip]
+- Release version 0.1.24
 ## [heimdall-sandbox-v0.1.23] - 2026-05-15
 
 ### 🐛 Bug Fixes
