@@ -755,13 +755,13 @@ fn bubblewrap_no_proc_policy_skips_proc_mount() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn bubblewrap_synthetic_identity_files_do_not_leak_host_databases() {
+fn bubblewrap_sees_host_identity_files_when_no_virtual_override() {
     if !bwrap_available() {
         return;
     }
     let cwd = unique_temp_dir("bwrap-identity");
     let policy = format!(
-        r#"{{"cwd":"{}","command":["sh","-c","cat /etc/passwd; cat /etc/group"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        r#"{{\"cwd\":\"{}\",\"command\":[\"sh\",\"-c\",\"test -r /etc/passwd && test -r /etc/group && printf ok\"],\"filesystem\":{{\"deny\":[\"missing\"]}},\"stdio\":\"piped\"}}"#,
         cwd.display()
     );
 
@@ -773,9 +773,7 @@ fn bubblewrap_synthetic_identity_files_do_not_leak_host_databases() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("nobody:x:65534"));
-    assert!(stdout.contains("nogroup:x:65534"));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok");
 }
 
 #[cfg(target_os = "linux")]

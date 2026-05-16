@@ -13,9 +13,6 @@ use crate::policy::{FilesystemPolicy, broadly_grants_cwd};
 use crate::{Error, Result};
 use heimdall_sandbox_policy::MaterializedFilesystemPolicy;
 
-const SYNTHETIC_PASSWD: &str = "nobody:x:65534:65534:Nobody:/nonexistent:/usr/sbin/nologin\n";
-const SYNTHETIC_GROUP: &str = "nogroup:x:65534:\n";
-
 pub(crate) struct BubblewrapResources {
     virtual_files: VirtualDataFiles,
     scratch_dir: VirtualScratchDir,
@@ -277,12 +274,7 @@ impl ProtectedPlaceholders {
 }
 
 pub(crate) fn identity_virtual_files(policy: &FilesystemPolicy) -> BTreeMap<PathBuf, String> {
-    let mut files = BTreeMap::from([
-        (PathBuf::from("/etc/passwd"), SYNTHETIC_PASSWD.to_string()),
-        (PathBuf::from("/etc/group"), SYNTHETIC_GROUP.to_string()),
-    ]);
-    files.extend(policy.virtual_files().clone());
-    files
+    policy.virtual_files().clone()
 }
 
 fn missing_protected_path_is_directory(path: &Path) -> bool {
