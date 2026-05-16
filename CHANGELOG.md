@@ -1,8 +1,22 @@
+## [0.1.30] - 2026-05-16
+
+### 🐛 Bug Fixes
+
+- Align seatbelt with Codex parity and handle external writable/deny paths (#8)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release version 0.1.30
 ## [0.1.29] - 2026-05-16
 
 ### 🐛 Bug Fixes
 
 - Use dirs crate for home directory and add HOME read tests
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.29 [ci skip]
+- Release version 0.1.29
 ## [0.1.28] - 2026-05-16
 
 ### 🐛 Bug Fixes
