@@ -9,5 +9,6 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+dirs.workspace = true
 ignore.workspace = true
 thiserror.workspace = true

@@ -618,9 +618,7 @@ fn regex_escape(value: &str) -> String {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
+    heimdall_sandbox_policy::home_dir()
 }
 
 #[cfg(target_os = "macos")]

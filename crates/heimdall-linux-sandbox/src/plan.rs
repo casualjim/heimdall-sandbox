@@ -363,9 +363,7 @@ fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
+    heimdall_sandbox_policy::home_dir()
 }
 
 fn path_aliases(path: &Path) -> BTreeSet<PathBuf> {
