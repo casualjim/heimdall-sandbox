@@ -534,7 +534,7 @@ mod tests {
         assert!(policy.contains("(sysctl-name \"hw.model\")"));
         assert!(policy.contains("(sysctl-name \"machdep.cpu.brand_string\")"));
         assert!(policy.contains("(subpath \"/usr/bin\")"));
-        assert!(policy.contains("(subpath \"/System/Library/Frameworks\")"));
+        assert!(policy.contains("(subpath \"/System\")"));
     }
 
     #[test]
