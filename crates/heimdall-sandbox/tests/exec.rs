@@ -456,6 +456,40 @@ fn bubblewrap_runs_isolated_command_when_filesystem_requested() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn bubblewrap_home_dotfiles_are_readable() {
+    if !bwrap_available() {
+        return;
+    }
+    let home = std::env::var("HOME").expect("HOME is set");
+    let has_gitconfig = std::path::Path::new(&home).join(".gitconfig").exists();
+    let cwd = unique_temp_dir("bwrap-home-read");
+    let test_cmd = format!(
+        "test -r {}/.gitconfig && printf readable || printf blocked",
+        home
+    );
+    let policy = serde_json::json!({
+        "cwd": cwd,
+        "command": ["sh", "-c", test_cmd],
+        "filesystem": {"deny": ["missing"]},
+        "stdio": "piped"
+    })
+    .to_string();
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if has_gitconfig {
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "readable");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn bubblewrap_keeps_unmatched_project_files_readonly() {
     if !bwrap_available() {
         return;
@@ -1107,6 +1141,40 @@ fn seatbelt_runs_isolated_command_when_filesystem_requested() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "isolated");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_home_dotfiles_are_readable() {
+    if !seatbelt_available() {
+        return;
+    }
+    let home = std::env::var("HOME").expect("HOME is set");
+    let has_gitconfig = std::path::Path::new(&home).join(".gitconfig").exists();
+    let cwd = unique_project_dir("seatbelt-home-read");
+    let test_cmd = format!(
+        "test -r {}/.gitconfig && printf readable || printf blocked",
+        home
+    );
+    let policy = serde_json::json!({
+        "cwd": cwd,
+        "command": ["sh", "-c", test_cmd],
+        "filesystem": {"deny": ["missing"]},
+        "stdio": "piped"
+    })
+    .to_string();
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("project temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if has_gitconfig {
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "readable");
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -28,6 +28,7 @@ tag-message = "chore: release version {{version}}"
 
 [workspace.dependencies]
 clap = { version = "4.5.51", features = ["derive"] }
+dirs = "6"
 heimdall-core = { version = "0.1.28", path = "crates/heimdall-core" }
 heimdall-linux-sandbox = { version = "0.1.28", path = "crates/heimdall-linux-sandbox" }
 heimdall-macos-sandbox = { version = "0.1.28", path = "crates/heimdall-macos-sandbox" }

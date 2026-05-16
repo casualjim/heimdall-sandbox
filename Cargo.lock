@@ -787,6 +787,7 @@ dependencies = [
 name = "heimdall-sandbox-policy"
 version = "0.1.28"
 dependencies = [
+ "dirs",
  "ignore",
  "thiserror",
 ]
