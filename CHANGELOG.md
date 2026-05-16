@@ -1,8 +1,18 @@
+## [0.1.28] - 2026-05-16
+
+### 🐛 Bug Fixes
+
+- Grant $HOME read-only access and remove default synthetic identity files
 ## [0.1.27] - 2026-05-15
 
 ### 🚀 Features
 
 - *(npm)* Include Dawn dylib in platform packages
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.27 [ci skip]
+- Release version 0.1.27
 ## [0.1.26] - 2026-05-15
 
 ### 🐛 Bug Fixes
