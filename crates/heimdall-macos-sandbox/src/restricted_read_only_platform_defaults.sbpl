@@ -1,4 +1,6 @@
-; macOS platform defaults included when a split filesystem policy requests `:minimal`.
+; macOS platform defaults — broad read-only access matching the Linux bwrap approach.
+; Linux mounts /usr, /etc, /opt etc as whole read-only roots.
+; The macOS equivalent is broad subpath allows for /System and /Library/Apple.
 
 ; Read access to standard system paths
 (allow file-read* file-test-existence
@@ -13,31 +15,14 @@
   (subpath "/var/db")
   (subpath "/private/var/db"))
 
+; Broad read and exec access for the system volume (like Linux /usr).
+(allow file-read* file-test-existence
+  (subpath "/System"))
+
 ; Map system frameworks + dylibs for loader.
 (allow file-map-executable
-  (subpath "/Library/Apple/System/Library/Frameworks")
-  (subpath "/Library/Apple/System/Library/PrivateFrameworks")
-  (subpath "/Library/Apple/usr/lib")
-  (subpath "/System/Library/Extensions")
-  (subpath "/System/Library/Frameworks")
-  (subpath "/System/Library/PrivateFrameworks")
-  (subpath "/System/Library/SubFrameworks")
-  (subpath "/System/iOSSupport/System/Library/Frameworks")
-  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
-  (subpath "/System/iOSSupport/System/Library/SubFrameworks")
-  (subpath "/usr/lib"))
-
-; System Framework and AppKit resources
-(allow file-read* file-test-existence
-  (subpath "/Library/Apple/System/Library/Frameworks")
-  (subpath "/Library/Apple/System/Library/PrivateFrameworks")
-  (subpath "/Library/Apple/usr/lib")
-  (subpath "/System/Library/Frameworks")
-  (subpath "/System/Library/PrivateFrameworks")
-  (subpath "/System/Library/SubFrameworks")
-  (subpath "/System/iOSSupport/System/Library/Frameworks")
-  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
-  (subpath "/System/iOSSupport/System/Library/SubFrameworks")
+  (subpath "/Library/Apple")
+  (subpath "/System")
   (subpath "/usr/lib"))
 
 ; Allow guarded vnodes.
@@ -99,11 +84,6 @@
 ; Allow reading standard config directories.
 (allow file-read* (subpath "/etc"))
 (allow file-read* (subpath "/private/etc"))
-
-(allow file-read* file-test-existence
-  (literal "/System/Library/CoreServices")
-  (literal "/System/Library/CoreServices/.SystemVersionPlatform.plist")
-  (literal "/System/Library/CoreServices/SystemVersion.plist"))
 
 ; Some processes read /var metadata during startup.
 (allow file-read-metadata (subpath "/var"))
