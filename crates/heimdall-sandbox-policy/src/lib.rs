@@ -428,6 +428,14 @@ pub fn broadly_grants_cwd(patterns: &[String]) -> bool {
         .any(|pattern| matches!(pattern, "." | "./" | "*" | "**" | "**/*"))
 }
 
+/// Return the current user's home directory.
+///
+/// Uses the `dirs` crate for platform-correct resolution.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
 fn protected_control_candidate_paths(cwd: &Path) -> Result<BTreeSet<PathBuf>> {
     let mut paths = [".git", ".agents", ".pi", DENY_FRAGMENT, WRITE_FRAGMENT]
         .into_iter()
