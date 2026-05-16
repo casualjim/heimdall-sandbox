@@ -348,6 +348,7 @@ struct SeatbeltPolicyBuilder<'a> {
     targets: DecomposedTargets,
     params: Vec<(String, PathBuf)>,
     next_param: usize,
+    home_dir: Option<PathBuf>,
 }
 
 impl<'a> SeatbeltPolicyBuilder<'a> {
@@ -358,11 +359,16 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
             writable_targets,
             protected_targets,
         };
+        let home_dir = dirs_home().and_then(|h| {
+            let h = h.canonicalize().ok()?;
+            (h.is_dir()).then_some(h)
+        });
         Self {
             request,
             targets,
             params: Vec::new(),
             next_param: 0,
+            home_dir,
         }
     }
 
@@ -393,6 +399,14 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
             policy.push_str(&format!(
                 "(allow file-read* (subpath (param \"{readable_root}\")))\n"
             ));
+        }
+        if let Some(home) = &self.home_dir {
+            for alias in path_aliases(home) {
+                let home_param = self.path_param("HOME_DIR", &alias);
+                policy.push_str(&format!(
+                    "(allow file-read* (subpath (param \"{home_param}\")))\n"
+                ));
+            }
         }
         policy
     }
@@ -601,6 +615,12 @@ fn regex_escape(value: &str) -> String {
         escaped.push(ch);
     }
     escaped
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(target_os = "macos")]

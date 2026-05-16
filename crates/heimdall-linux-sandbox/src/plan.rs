@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -244,6 +245,13 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 self.ro_bind(&root, &root);
             }
         }
+        if let Some(home) = dirs_home() {
+            for alias in path_aliases(&home) {
+                if alias.is_dir() {
+                    self.ro_bind(&alias, &alias);
+                }
+            }
+        }
     }
 
     fn add_policy_mounts(&mut self) {
@@ -352,6 +360,20 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
 fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
     args.into_iter().map(OsString::from).collect()
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+fn path_aliases(path: &Path) -> BTreeSet<PathBuf> {
+    let mut aliases = BTreeSet::from([path.to_path_buf()]);
+    if let Ok(canonical) = path.canonicalize() {
+        aliases.insert(canonical);
+    }
+    aliases
 }
 
 #[cfg(test)]
@@ -510,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_defaults_include_system_roots_and_identity_overrides() {
+    fn platform_defaults_include_system_roots() {
         let cwd = std::env::current_dir().expect("cwd exists");
         let request = BubblewrapRequest {
             cwd: &cwd,
@@ -553,17 +575,21 @@ mod tests {
             );
         }
         assert!(
-            args.windows(3)
-                .any(|w| w[0] == "--ro-bind-data" && w[2] == "/etc/passwd")
+            !args
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind-data" && w[2] == "/etc/passwd"),
+            "no default virtual /etc/passwd"
         );
         assert!(
-            args.windows(3)
-                .any(|w| w[0] == "--ro-bind-data" && w[2] == "/etc/group")
+            !args
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind-data" && w[2] == "/etc/group"),
+            "no default virtual /etc/group"
         );
     }
 
     #[test]
-    fn explicit_virtual_identity_files_override_defaults() {
+    fn explicit_virtual_files_are_included() {
         let mut virtual_files = BTreeMap::new();
         virtual_files.insert(PathBuf::from("/etc/passwd"), "custom-passwd".to_string());
         let policy = FilesystemPolicy::new(Vec::new(), Vec::new(), virtual_files);
@@ -573,10 +599,7 @@ mod tests {
             files.get(Path::new("/etc/passwd")),
             Some(&"custom-passwd".to_string())
         );
-        assert_eq!(
-            files.get(Path::new("/etc/group")),
-            Some(&"nogroup:x:65534:\n".to_string())
-        );
+        assert_eq!(files.get(Path::new("/etc/group")), None);
     }
 
     #[test]
