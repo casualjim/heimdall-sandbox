@@ -1,8 +1,18 @@
+## [0.1.29] - 2026-05-16
+
+### 🐛 Bug Fixes
+
+- Use dirs crate for home directory and add HOME read tests
 ## [0.1.28] - 2026-05-16
 
 ### 🐛 Bug Fixes
 
 - Grant $HOME read-only access and remove default synthetic identity files
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.28 [ci skip]
+- Release version 0.1.28
 ## [0.1.27] - 2026-05-15
 
 ### 🚀 Features
