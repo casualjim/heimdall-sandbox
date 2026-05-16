@@ -1,3 +1,9 @@
+## [0.1.31] - 2026-05-16
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.31 [ci skip]
+- Release version 0.1.31
 ## [0.1.30] - 2026-05-16
 
 ### 🐛 Bug Fixes
