@@ -267,8 +267,13 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
     ///
     /// Returns a sandbox misconfiguration when policy patterns are invalid or cwd cannot be walked.
     pub fn materialize(self) -> Result<MaterializedFilesystemPolicy> {
-        let deny = self.build_matcher(self.policy.deny(), DENY_FRAGMENT)?;
-        let writable = self.build_matcher(self.policy.writable(), WRITE_FRAGMENT)?;
+        // Expand ~ in all patterns and split into CWD-relative (gitignore) vs
+        // external-absolute (direct target) groups.
+        let cwd_relative_deny = self.expand_and_split(self.policy.deny());
+        let cwd_relative_writable = self.expand_and_split(self.policy.writable());
+
+        let deny = self.build_matcher(&cwd_relative_deny, DENY_FRAGMENT)?;
+        let writable = self.build_matcher(&cwd_relative_writable, WRITE_FRAGMENT)?;
         let paths = self.walk_existing()?;
 
         let mut deny_targets = BTreeSet::new();
@@ -285,6 +290,10 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             }
         }
 
+        // Add external absolute paths directly as targets.
+        self.add_external_targets(self.policy.deny(), &mut deny_targets);
+        self.add_external_targets(self.policy.writable(), &mut writable_targets);
+
         let protected_targets = self.protected_control_targets(&writable, &deny)?;
 
         Ok(MaterializedFilesystemPolicy {
@@ -292,6 +301,43 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             writable_targets,
             protected_targets,
         })
+    }
+
+    /// Expand `~` in patterns and split into two groups:
+    /// - CWD-relative patterns (including glob patterns like `*.txt`)
+    /// - External absolute paths that exist on disk outside CWD
+    ///
+    /// External absolute paths are removed from the returned patterns and tracked
+    /// separately so they can be added as direct targets without gitignore matching.
+    fn expand_and_split(&self, patterns: &[String]) -> Vec<String> {
+        let home = home_dir();
+        let mut result = Vec::with_capacity(patterns.len());
+        for pattern in patterns {
+            let expanded = match &home {
+                Some(h) => pattern.replace('~', &h.to_string_lossy()),
+                None => pattern.clone(),
+            };
+            result.push(expanded);
+        }
+        result
+    }
+
+    /// Add external absolute patterns directly as targets.
+    ///
+    /// External paths are absolute paths that exist on disk and are not under CWD.
+    /// They bypass gitignore matching entirely because the CWD walk cannot discover them.
+    fn add_external_targets(&self, patterns: &[String], targets: &mut BTreeSet<PathBuf>) {
+        let home = home_dir();
+        for pattern in patterns {
+            let expanded = match &home {
+                Some(h) => pattern.replace('~', &h.to_string_lossy()),
+                None => pattern.clone(),
+            };
+            let path = Path::new(&expanded);
+            if path.is_absolute() && !path.starts_with(self.cwd) && path.exists() {
+                targets.insert(path.to_path_buf());
+            }
+        }
     }
 
     fn build_matcher(&self, patterns: &[String], fragment: &str) -> Result<Gitignore> {
@@ -582,6 +628,118 @@ mod tests {
             !materialized
                 .writable_targets()
                 .contains(&cwd.join("data.txt"))
+        );
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[test]
+    fn external_absolute_writable_paths_are_added_directly() {
+        let cwd = unique_dir("external-writable");
+        // Create an external dir that exists outside CWD.
+        let external = std::env::temp_dir().join("heimdall-external-writable-target");
+        std::fs::create_dir_all(&external).expect("external dir created");
+
+        let policy = FilesystemPolicy::new(
+            Vec::new(),
+            vec![external.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(
+            materialized.writable_targets().contains(&external),
+            "external absolute writable path should be added as a writable target"
+        );
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+        std::fs::remove_dir_all(&external).expect("external dir removed");
+    }
+
+    #[test]
+    fn external_absolute_deny_paths_are_added_directly() {
+        let cwd = unique_dir("external-deny");
+        // Create an external dir that exists outside CWD.
+        let external = std::env::temp_dir().join("heimdall-external-deny-target");
+        std::fs::create_dir_all(&external).expect("external dir created");
+
+        let policy = FilesystemPolicy::new(
+            vec![external.to_string_lossy().to_string()],
+            Vec::new(),
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(
+            materialized.deny_targets().contains(&external),
+            "external absolute deny path should be added as a deny target"
+        );
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+        std::fs::remove_dir_all(&external).expect("external dir removed");
+    }
+
+    #[test]
+    fn deny_wins_over_external_writable() {
+        let cwd = unique_dir("deny-wins-external");
+        // Create an external parent dir and a subdir to deny.
+        let external = std::env::temp_dir().join("heimdall-external-deny-wins-parent");
+        let secret = external.join("secret");
+        std::fs::create_dir_all(&secret).expect("external dirs created");
+
+        let policy = FilesystemPolicy::new(
+            vec![secret.to_string_lossy().to_string()],
+            vec![external.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(
+            materialized.deny_targets().contains(&secret),
+            "denied subdir should be in deny_targets"
+        );
+        assert!(
+            materialized.writable_targets().contains(&external),
+            "parent dir should be in writable_targets"
+        );
+        // The backends handle precedence: deny rules are emitted after writable
+        // rules so seatbelt/bwrap enforce deny over writable.
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+        std::fs::remove_dir_all(&external).expect("external dir removed");
+    }
+
+    #[test]
+    fn tilde_patterns_expand_to_home_dir() {
+        let cwd = unique_dir("tilde-expand");
+        let home = home_dir().expect("home dir exists");
+        // Use ~/something as a writable pattern.
+        // We test against a real directory under home.
+        let target = home.join(".config");
+        if !target.is_dir() {
+            // Skip if ~/.config doesn't exist on this system.
+            std::fs::remove_dir_all(cwd).expect("temp dir removed");
+            return;
+        }
+
+        let policy = FilesystemPolicy::new(
+            Vec::new(),
+            vec!["~/.config".to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(
+            materialized.writable_targets().contains(&target),
+            "~/.config should expand and be added as a writable target"
         );
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
     }

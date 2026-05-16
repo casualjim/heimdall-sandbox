@@ -1098,7 +1098,7 @@ fn seatbelt_writes_temp_cwd_through_canonical_alias() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn seatbelt_denies_unselected_non_cwd_temp_writes() {
+fn seatbelt_allows_non_cwd_temp_writes() {
     if !seatbelt_available() {
         return;
     }
@@ -1116,8 +1116,10 @@ fn seatbelt_denies_unselected_non_cwd_temp_writes() {
     std::fs::remove_dir_all(cwd).expect("project temp dir is removed");
     std::fs::remove_dir_all(outside).expect("temp dir is removed");
 
-    assert!(!output.status.success());
-    assert!(!target_exists);
+    // Writing to a temp dir outside CWD is now allowed because /tmp and
+    // /private/tmp are platform-writable defaults (matching Codex's policy).
+    assert!(output.status.success());
+    assert!(target_exists);
 }
 
 #[cfg(target_os = "macos")]

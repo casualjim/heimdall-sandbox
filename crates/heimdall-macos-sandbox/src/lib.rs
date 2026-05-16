@@ -100,6 +100,7 @@ const PLATFORM_DEFAULTS: &str = r#"
   (subpath "/Library/Preferences")
   (subpath "/Library/Preferences/Logging")
   (subpath "/private/var/db")
+  (subpath "/private/var/db/DarwinDirectory/local/recordStore.data")
   (subpath "/private/var/db/timezone")
   (subpath "/usr/lib")
   (subpath "/usr/share"))
@@ -112,6 +113,9 @@ const PLATFORM_DEFAULTS: &str = r#"
   (subpath "/System/Library/Frameworks")
   (subpath "/System/Library/PrivateFrameworks")
   (subpath "/System/Library/SubFrameworks")
+  (subpath "/System/iOSSupport/System/Library/Frameworks")
+  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
+  (subpath "/System/iOSSupport/System/Library/SubFrameworks")
   (subpath "/usr/lib"))
 
 (allow file-read* file-test-existence
@@ -121,6 +125,9 @@ const PLATFORM_DEFAULTS: &str = r#"
   (subpath "/System/Library/Frameworks")
   (subpath "/System/Library/PrivateFrameworks")
   (subpath "/System/Library/SubFrameworks")
+  (subpath "/System/iOSSupport/System/Library/Frameworks")
+  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
+  (subpath "/System/iOSSupport/System/Library/SubFrameworks")
   (subpath "/usr/lib"))
 
 (allow system-mac-syscall (mac-policy-name "vnguard"))
@@ -143,6 +150,8 @@ const PLATFORM_DEFAULTS: &str = r#"
   (literal "/dev/autofs_nowait")
   (literal "/dev/random")
   (literal "/dev/urandom")
+  (literal "/private/etc/master.passwd")
+  (literal "/private/etc/passwd")
   (literal "/private/etc/protocols")
   (literal "/private/etc/services"))
 (allow file-read* file-test-existence file-write-data
@@ -151,13 +160,20 @@ const PLATFORM_DEFAULTS: &str = r#"
 (allow file-read-data file-test-existence file-write-data
   (subpath "/dev/fd"))
 
-(allow file-read* file-test-existence (subpath "/tmp"))
-(allow file-read* file-test-existence (subpath "/private/tmp"))
-(allow file-read* file-test-existence (subpath "/var/tmp"))
-(allow file-read* file-test-existence (subpath "/private/var/tmp"))
+; Provide access to debugger helpers.
+(allow file-read* file-test-existence file-write-data file-ioctl
+  (literal "/dev/dtracehelper"))
+
+; Scratch space so tools can create temp files.
+(allow file-read* file-test-existence file-write* (subpath "/tmp"))
+(allow file-read* file-write* (subpath "/private/tmp"))
+(allow file-read* file-write* (subpath "/var/tmp"))
+(allow file-read* file-write* (subpath "/private/var/tmp"))
 
 (allow file-read* (subpath "/etc"))
 (allow file-read* (subpath "/private/etc"))
+
+(allow file-read* (subpath "/System/Library/OpenSSL"))
 
 (allow file-read* file-test-existence
   (literal "/System/Library/CoreServices")
@@ -167,18 +183,33 @@ const PLATFORM_DEFAULTS: &str = r#"
 (allow file-read-metadata (subpath "/var"))
 (allow file-read-metadata (subpath "/private/var"))
 
+; Regulatory domain support.
+(allow file-read*
+  (literal "/private/var/db/eligibilityd/eligibility.plist"))
+
 (allow mach-lookup
   (global-name "com.apple.analyticsd")
+  (global-name "com.apple.analyticsd.messagetracer")
+  (global-name "com.apple.appsleep")
+  (global-name "com.apple.audio.audiohald")
+  (global-name "com.apple.audio.AudioComponentRegistrar")
   (global-name "com.apple.bsd.dirhelper")
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.diagnosticd")
+  (global-name "com.apple.dt.automationmode.reader")
+  (global-name "com.apple.espd")
   (global-name "com.apple.logd")
+  (global-name "com.apple.logd.events")
+  (global-name "com.apple.runningboard")
   (global-name "com.apple.secinitd")
   (global-name "com.apple.system.DirectoryService.libinfo_v1")
   (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.notification_center")
   (global-name "com.apple.system.opendirectoryd.membership")
   (global-name "com.apple.trustd")
   (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.xpc.activity.unmanaged")
   (local-name "com.apple.cfprefsd.agent"))
 
 (allow network-outbound (literal "/private/var/run/syslog"))
@@ -195,6 +226,7 @@ const PLATFORM_DEFAULTS: &str = r#"
 (allow file-read-data (subpath "/usr/libexec"))
 (allow file-read-metadata (subpath "/usr/libexec"))
 
+(allow file-read* (subpath "/Library/Preferences"))
 (allow file-read* (subpath "/opt/homebrew/lib"))
 (allow file-read* (subpath "/usr/local/lib"))
 (allow file-read* (subpath "/Applications"))
@@ -208,6 +240,8 @@ const PLATFORM_DEFAULTS: &str = r#"
 (allow file-read-metadata (literal "/dev/stdin"))
 (allow file-read-metadata (literal "/dev/stdout"))
 (allow file-read-metadata (literal "/dev/stderr"))
+(allow file-read-metadata (regex #"^/dev/tty[^/]*$"))
+(allow file-read-metadata (regex #"^/dev/pty[^/]*$"))
 (allow file-read* file-write* (regex #"^/dev/ttys[0-9]+$"))
 (allow file-read* file-write* (literal "/dev/ptmx"))
 (allow file-ioctl (regex #"^/dev/ttys[0-9]+$"))
@@ -215,6 +249,10 @@ const PLATFORM_DEFAULTS: &str = r#"
 (allow file-read-metadata (literal "/System/Volumes") (vnode-type DIRECTORY))
 (allow file-read-metadata (literal "/System/Volumes/Data") (vnode-type DIRECTORY))
 (allow file-read-metadata (literal "/System/Volumes/Data/Users") (vnode-type DIRECTORY))
+
+; App sandbox extensions.
+(allow file-read* (extension "com.apple.app-sandbox.read"))
+(allow file-read* file-write* (extension "com.apple.app-sandbox.read-write"))
 "#;
 
 const NETWORK_SUPPORT_POLICY: &str = r#"
@@ -234,7 +272,6 @@ const NETWORK_SUPPORT_POLICY: &str = r#"
   (global-name "com.apple.SystemConfiguration.configd"))
 
 (allow sysctl-read (sysctl-name-regex #"^net.routetable"))
-(allow file-write* (subpath (param "DARWIN_USER_CACHE_DIR")))
 "#;
 
 /// Result type for macOS sandbox operations.
@@ -382,6 +419,7 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         let heimdall_wildcard = self.heimdall_wildcard_write_deny_policy();
         let exclusions = self.write_exclusions();
         text.push_str(&self.write_policy(&exclusions));
+        text.push_str(&self.platform_writable_policy()?);
         text.push_str(&self.deny_policy());
         text.push_str(&self.virtual_write_deny_policy());
         text.push_str(&heimdall_wildcard);
@@ -537,14 +575,40 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
             .collect()
     }
 
+    /// Platform-specific writable directories that should be accessible unconditionally.
+    ///
+    /// On macOS this includes the per-user temp directory (`DARWIN_USER_TEMP_DIR`) and the
+    /// per-user cache directory (`DARWIN_USER_CACHE_DIR`), which are the macOS equivalents
+    /// of Linux `/tmp` and `/var/cache`. These are needed by tools like `git`, `xcrun`,
+    /// and Node.js/OpenSSL for cache and temp files under `/var/folders/...`.
+    fn platform_writable_policy(&mut self) -> Result<String> {
+        let mut policy = String::new();
+
+        if let Ok(temp_dir) = darwin_user_temp_dir() {
+            let param = self.path_param("PLATFORM_WRITABLE", &temp_dir);
+            policy.push_str(&format!(
+                "; per-user temp directory (DARWIN_USER_TEMP_DIR)\n\
+                 (allow file-read* file-write* (subpath (param \"{}\")))\n",
+                param
+            ));
+        }
+
+        if let Ok(cache_dir) = darwin_user_cache_dir() {
+            let param = self.path_param("PLATFORM_WRITABLE", &cache_dir);
+            policy.push_str(&format!(
+                "; per-user cache directory (DARWIN_USER_CACHE_DIR)\n\
+                 (allow file-read* file-write* (subpath (param \"{}\")))\n",
+                param
+            ));
+        }
+
+        Ok(policy)
+    }
+
     fn network_policy(&mut self) -> Result<String> {
         if self.request.network_mode == NetworkMode::None {
             return Ok(String::new());
         }
-        self.params.push((
-            "DARWIN_USER_CACHE_DIR".to_string(),
-            darwin_user_cache_dir()?,
-        ));
         Ok(format!(
             "(allow network-outbound)\n(allow network-inbound)\n{}\n",
             NETWORK_SUPPORT_POLICY
@@ -623,17 +687,31 @@ fn dirs_home() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn darwin_user_cache_dir() -> Result<PathBuf> {
+    confstr_path(libc::_CS_DARWIN_USER_CACHE_DIR, "_CS_DARWIN_USER_CACHE_DIR")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn darwin_user_cache_dir() -> Result<PathBuf> {
+    Ok(std::env::temp_dir())
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Result<PathBuf> {
+    confstr_path(libc::_CS_DARWIN_USER_TEMP_DIR, "_CS_DARWIN_USER_TEMP_DIR")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn darwin_user_temp_dir() -> Result<PathBuf> {
+    Ok(std::env::temp_dir())
+}
+
+#[cfg(target_os = "macos")]
+fn confstr_path(cs_name: libc::c_int, label: &str) -> Result<PathBuf> {
     use std::ffi::CStr;
 
     let mut buffer = vec![0_i8; (libc::PATH_MAX as usize) + 1];
     // SAFETY: `buffer` points to writable memory with length `buffer.len()`.
-    let len = unsafe {
-        libc::confstr(
-            libc::_CS_DARWIN_USER_CACHE_DIR,
-            buffer.as_mut_ptr(),
-            buffer.len(),
-        )
-    };
+    let len = unsafe { libc::confstr(cs_name, buffer.as_mut_ptr(), buffer.len()) };
     if len > 0 {
         // SAFETY: `confstr` writes a nul-terminated string when it returns a non-zero length.
         if let Ok(path) = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_str() {
@@ -643,13 +721,8 @@ fn darwin_user_cache_dir() -> Result<PathBuf> {
         }
     }
     Err(Error::PlatformDirectory {
-        message: "confstr(_CS_DARWIN_USER_CACHE_DIR) returned empty path".to_string(),
+        message: format!("confstr({label}) returned empty path"),
     })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn darwin_user_cache_dir() -> Result<PathBuf> {
-    Ok(std::env::temp_dir())
 }
 
 #[cfg(test)]
@@ -748,7 +821,26 @@ mod tests {
 
         assert!(policy.contains("(allow network-outbound)\n(allow network-inbound)"));
         assert!(policy.contains("com.apple.SecurityServer"));
-        assert!(policy.contains("DARWIN_USER_CACHE_DIR"));
+    }
+
+    #[test]
+    fn platform_writable_dirs_are_unconditionally_accessible() {
+        let cwd = std::env::current_dir().expect("cwd exists");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::default();
+        let plan = request(&cwd, &argv, &filesystem_policy)
+            .into_plan_with_materialized(empty_materialized_policy())
+            .expect("plan builds");
+        let policy = policy_arg(plan.args());
+
+        // DARWIN_USER_CACHE_DIR and DARWIN_USER_TEMP_DIR must be writable
+        // even without network access.
+        assert!(policy.contains("PLATFORM_WRITABLE_"));
+        assert!(
+            plan.args()
+                .iter()
+                .any(|arg| arg.contains("PLATFORM_WRITABLE"))
+        );
     }
 
     #[test]
