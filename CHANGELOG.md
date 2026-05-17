@@ -1,8 +1,18 @@
+## [0.1.35] - 2026-05-17
+
+### 🐛 Bug Fixes
+
+- Writable ancestor patterns grant CWD write access (#11)
 ## [0.1.34] - 2026-05-16
 
 ### 🐛 Bug Fixes
 
 - *(macos)* Use broad /System read access instead of cherry-picked subpaths (#10)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.34 [ci skip]
+- Release version 0.1.34
 ## [0.1.33] - 2026-05-16
 
 ### 🚜 Refactor
