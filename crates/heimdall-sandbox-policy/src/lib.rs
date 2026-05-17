@@ -278,13 +278,14 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
 
         let mut deny_targets = BTreeSet::new();
         let mut writable_targets = BTreeSet::new();
-        let cwd_is_broadly_writable = broadly_grants_cwd(self.policy.writable());
+        let cwd_is_covered =
+            broadly_grants_cwd(self.policy.writable()) || self.cwd_covered_by_writable_ancestor();
         for path in &paths {
             let is_dir = path.is_dir();
             if self.selected(path, is_dir, &deny)? {
                 deny_targets.insert(path.clone());
             } else if self.selected(path, is_dir, &writable)?
-                || (path == self.cwd && cwd_is_broadly_writable)
+                || (path == self.cwd && cwd_is_covered)
             {
                 writable_targets.insert(path.clone());
             }
@@ -402,11 +403,31 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         Ok(matcher.matched(relative, is_dir).is_ignore())
     }
 
+    /// Returns true when any writable pattern resolves to an absolute path that is an
+    /// ancestor of CWD, meaning CWD and its contents are implicitly writable.
+    fn cwd_covered_by_writable_ancestor(&self) -> bool {
+        let home = home_dir();
+        self.policy.writable().iter().any(|pattern| {
+            let expanded = match &home {
+                Some(h) => pattern.replace('~', &h.to_string_lossy()),
+                None => pattern.clone(),
+            };
+            let path = Path::new(&expanded);
+            path.is_absolute() && path.is_dir() && self.cwd.starts_with(path)
+        })
+    }
+
     fn protected_control_targets(
         &self,
         writable: &Gitignore,
         deny: &Gitignore,
     ) -> Result<BTreeSet<PathBuf>> {
+        // When a writable ancestor covers CWD, the user trusts the entire tree.
+        // Do not protect any control paths — they are explicitly writable.
+        if self.cwd_covered_by_writable_ancestor() {
+            return Ok(BTreeSet::new());
+        }
+
         let mut protected = BTreeSet::new();
         let cwd_is_writable =
             self.selected(self.cwd, true, writable)? || broadly_grants_cwd(self.policy.writable());
@@ -607,6 +628,37 @@ mod tests {
                 .contains(&cwd.join(DENY_FRAGMENT))
         );
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[test]
+    fn writable_ancestor_makes_cwd_and_control_paths_writable() {
+        // Create a structure: parent/cwd/.git where parent is the writable ancestor.
+        let parent = unique_dir("writable-ancestor");
+        let cwd = parent.join("sub");
+        std::fs::create_dir(&cwd).expect("sub dir created");
+        std::fs::create_dir(cwd.join(".git")).expect("control dir created");
+        std::fs::write(cwd.join(".heimdall-local"), "control").expect("control file written");
+
+        let policy = FilesystemPolicy::new(
+            Vec::new(),
+            vec![parent.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        // CWD must be in writable_targets (covered by ancestor).
+        assert!(materialized.writable_targets().contains(&cwd));
+        // Control paths must NOT be protected when CWD is covered by a writable ancestor.
+        assert!(!materialized.protected_targets().contains(&cwd.join(".git")));
+        assert!(
+            !materialized
+                .protected_targets()
+                .contains(&cwd.join(".heimdall-local"))
+        );
+        std::fs::remove_dir_all(parent).expect("temp dir removed");
     }
 
     #[test]
