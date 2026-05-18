@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -359,6 +360,9 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 self.ro_bind(&root, &root);
             }
         }
+        if self.request.network_mode == NetworkMode::Host {
+            self.add_host_network_runtime_paths();
+        }
         if let Some(home) = dirs_home() {
             for alias in path_aliases(&home) {
                 if alias.is_dir() {
@@ -529,6 +533,56 @@ impl<'a> BubblewrapArgBuilder<'a> {
             .map(|name| parent.join(name))
             .filter(|path| path.is_file())
             .collect()
+    }
+
+    fn add_host_network_runtime_paths(&mut self) {
+        self.add_resolver_symlink_target();
+        self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"));
+    }
+
+    fn add_resolver_symlink_target(&mut self) {
+        let Some(target) = Self::resolver_symlink_target(Path::new("/etc/resolv.conf")) else {
+            return;
+        };
+        self.add_destination_parent_dirs(&target);
+        self.ro_bind(&target, &target);
+    }
+
+    fn add_runtime_socket(&mut self, socket: &Path) {
+        if !socket.exists() {
+            return;
+        }
+        self.add_destination_parent_dirs(socket);
+        self.bind(socket, socket);
+    }
+
+    fn resolver_symlink_target(resolv_conf: &Path) -> Option<PathBuf> {
+        let target = fs::read_link(resolv_conf).ok()?;
+        let absolute = if target.is_absolute() {
+            target
+        } else {
+            resolv_conf.parent()?.join(target)
+        };
+        absolute.exists().then_some(absolute)
+    }
+
+    fn add_destination_parent_dirs(&mut self, destination: &Path) {
+        let Some(parent) = destination.parent() else {
+            return;
+        };
+        let mut directories = Vec::new();
+        let mut current = parent;
+        while current != Path::new("/") {
+            directories.push(current.to_path_buf());
+            let Some(next) = current.parent() else {
+                break;
+            };
+            current = next;
+        }
+        directories.reverse();
+        for directory in directories {
+            self.dir(&directory);
+        }
     }
 
     fn ro_bind(&mut self, source: &Path, destination: &Path) {
