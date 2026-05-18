@@ -926,10 +926,11 @@ mod tests {
         symlink("../run/systemd/resolve/stub-resolv.conf", &link)
             .expect("resolver symlink created");
 
+        let expected = target.canonicalize().expect("target canonicalizes");
         let resolved = BubblewrapArgBuilder::resolver_symlink_target(&link);
         std::fs::remove_dir_all(&root).expect("test dir removed");
 
-        assert_eq!(resolved, Some(target));
+        assert_eq!(resolved, Some(expected));
     }
 
     #[test]
