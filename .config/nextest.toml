@@ -1,0 +1,3 @@
+[profile.default]
+# Any test that runs longer than 30 seconds is considered hung.
+slow-timeout = { period = "30s", terminate-after = 1 }
