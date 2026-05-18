@@ -636,6 +636,24 @@ mod tests {
     }
 
     #[test]
+    fn network_host_omits_unshare_net() {
+        let cwd = std::env::current_dir().expect("cwd exists");
+        let request = BubblewrapRequest {
+            cwd: &cwd,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &FilesystemPolicy::default(),
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .expect("plan builds");
+
+        assert!(!plan.args.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
     fn unshare_user_is_enabled() {
         let cwd = std::env::current_dir().expect("cwd exists");
         let request = BubblewrapRequest {
