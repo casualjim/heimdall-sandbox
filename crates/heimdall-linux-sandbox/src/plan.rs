@@ -192,6 +192,7 @@ impl BubblewrapPlan {
     }
 }
 
+#[derive(Clone, Copy)]
 struct PolicyMount<'a> {
     source: &'a Path,
     destination: &'a Path,
@@ -238,6 +239,38 @@ impl<'a> PolicyMount<'a> {
             self.destination.to_path_buf(),
         )
     }
+
+    fn is_directory_mask(&self) -> bool {
+        matches!(
+            self.kind,
+            PolicyMountKind::Deny | PolicyMountKind::Protected
+        ) && self.source.is_dir()
+    }
+
+    fn must_stage_mountpoint_for(&self, child: &Self) -> bool {
+        self.is_directory_mask()
+            && child.destination != self.destination
+            && child.destination.starts_with(self.destination)
+    }
+
+    fn mountpoint_kind(&self) -> MountpointKind {
+        match self.kind {
+            PolicyMountKind::VirtualFile { .. } => MountpointKind::File,
+            PolicyMountKind::Writable | PolicyMountKind::Deny | PolicyMountKind::Protected => {
+                if self.source.is_dir() {
+                    MountpointKind::Directory
+                } else {
+                    MountpointKind::File
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MountpointKind {
+    Directory,
+    File,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,18 +390,75 @@ impl<'a> BubblewrapArgBuilder<'a> {
         }));
         mounts.sort_by_key(PolicyMount::sort_key);
 
-        for mount in mounts {
-            match mount.kind {
-                PolicyMountKind::Writable => self.bind(mount.source, mount.destination),
-                PolicyMountKind::VirtualFile { fd } => {
-                    self.args.push("--ro-bind-data".into());
-                    self.args.push(fd.to_string().into());
-                    self.args.push(mount.destination.as_os_str().to_os_string());
+        for index in 0..mounts.len() {
+            let mount = mounts[index];
+            if mount.is_directory_mask()
+                && mounts
+                    .iter()
+                    .any(|candidate| mount.must_stage_mountpoint_for(candidate))
+            {
+                // Bubblewrap creates bind destinations inside the current sandbox view.
+                // A readonly empty-dir mask would make later child mountpoints impossible
+                // to create, so stage the masked directory as writable tmpfs, create the
+                // nested mountpoints, seal it readonly, then layer the specific child
+                // mounts later in sorted order.
+                self.tmpfs(mount.destination);
+                for candidate in mounts
+                    .iter()
+                    .filter(|candidate| mount.must_stage_mountpoint_for(candidate))
+                {
+                    self.add_staged_mountpoint(mount.destination, candidate, &empty_file);
                 }
-                PolicyMountKind::Deny | PolicyMountKind::Protected => {
-                    self.ro_bind(mount.source, mount.destination);
-                }
+                self.remount_ro(mount.destination);
+                continue;
             }
+
+            self.add_policy_mount(mount);
+        }
+    }
+
+    fn add_policy_mount(&mut self, mount: PolicyMount<'_>) {
+        match mount.kind {
+            PolicyMountKind::Writable => self.bind(mount.source, mount.destination),
+            PolicyMountKind::VirtualFile { fd } => {
+                self.args.push("--ro-bind-data".into());
+                self.args.push(fd.to_string().into());
+                self.args.push(mount.destination.as_os_str().to_os_string());
+            }
+            PolicyMountKind::Deny | PolicyMountKind::Protected => {
+                self.ro_bind(mount.source, mount.destination);
+            }
+        }
+    }
+
+    fn add_staged_mountpoint(&mut self, mask: &Path, mount: &PolicyMount<'_>, empty_file: &Path) {
+        let placeholder_directory = match mount.mountpoint_kind() {
+            MountpointKind::Directory => mount.destination,
+            MountpointKind::File => mount.destination.parent().unwrap_or(mask),
+        };
+        self.add_staged_directories(mask, placeholder_directory);
+        if mount.mountpoint_kind() == MountpointKind::File {
+            self.ro_bind(empty_file, mount.destination);
+        }
+    }
+
+    fn add_staged_directories(&mut self, mask: &Path, destination: &Path) {
+        if destination == mask || !destination.starts_with(mask) {
+            return;
+        }
+
+        let mut directories = Vec::new();
+        let mut current = destination;
+        while current != mask {
+            directories.push(current.to_path_buf());
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            current = parent;
+        }
+        directories.reverse();
+        for directory in directories {
+            self.dir(&directory);
         }
     }
 
@@ -419,9 +509,26 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.mount("--bind", source, destination);
     }
 
+    fn tmpfs(&mut self, destination: &Path) {
+        self.single_path_arg("--tmpfs", destination);
+    }
+
+    fn remount_ro(&mut self, destination: &Path) {
+        self.single_path_arg("--remount-ro", destination);
+    }
+
+    fn dir(&mut self, destination: &Path) {
+        self.single_path_arg("--dir", destination);
+    }
+
     fn mount(&mut self, flag: &str, source: &Path, destination: &Path) {
         self.args.push(flag.into());
         self.args.push(source.as_os_str().to_os_string());
+        self.args.push(destination.as_os_str().to_os_string());
+    }
+
+    fn single_path_arg(&mut self, flag: &str, destination: &Path) {
+        self.args.push(flag.into());
         self.args.push(destination.as_os_str().to_os_string());
     }
 
@@ -733,5 +840,68 @@ mod tests {
 
         assert!(ro_cwd < rw_cwd);
         assert!(rw_cwd < deny);
+    }
+
+    #[test]
+    fn denied_parent_stages_writable_child_mountpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-specificity-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let denied = root.join(".config");
+        let writable = denied.join("nvim");
+        std::fs::create_dir_all(&writable).expect("test dirs created");
+        let policy = FilesystemPolicy::new(
+            vec![denied.to_string_lossy().to_string()],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let request = BubblewrapRequest {
+            cwd: &root,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &policy,
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(
+                MaterializedFilesystemPolicy::new(
+                    BTreeSet::from([denied.clone()]),
+                    BTreeSet::from([writable.clone()]),
+                    BTreeSet::new(),
+                ),
+                PathBuf::from("/usr/bin/bwrap"),
+            )
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+        let tmpfs_parent = args
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == denied.to_string_lossy())
+            .expect("denied parent is staged as tmpfs");
+        let child_mountpoint = args
+            .windows(2)
+            .position(|w| w[0] == "--dir" && w[1] == writable.to_string_lossy())
+            .expect("writable child mountpoint is created before parent is sealed");
+        let seal_parent = args
+            .windows(2)
+            .position(|w| w[0] == "--remount-ro" && w[1] == denied.to_string_lossy())
+            .expect("denied parent is remounted readonly");
+        let bind_child = args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[2] == writable.to_string_lossy())
+            .expect("writable child bind exists");
+
+        assert!(tmpfs_parent < child_mountpoint);
+        assert!(child_mountpoint < seal_parent);
+        assert!(seal_parent < bind_child);
     }
 }
