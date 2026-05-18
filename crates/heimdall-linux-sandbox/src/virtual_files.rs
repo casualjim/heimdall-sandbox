@@ -8,6 +8,7 @@ use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::policy::{FilesystemPolicy, broadly_grants_cwd};
 use crate::{Error, Result};
@@ -159,26 +160,15 @@ fn create_virtual_file_data(index: usize) -> Result<File> {
     Ok(file)
 }
 
+static SCRATCH_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 struct VirtualScratchDir {
     path: PathBuf,
 }
 
 impl VirtualScratchDir {
     fn create() -> Result<Self> {
-        let root = std::env::temp_dir().join(format!(
-            "heimdall-virtual-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| {
-                    Error::sandbox_misconfiguration(format!("system clock error: {error}"))
-                })?
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).map_err(|error| {
-            Error::sandbox_misconfiguration(format!(
-                "failed to create virtual scratch dir: {error}"
-            ))
-        })?;
+        let root = create_unique_scratch_dir()?;
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(
             |error| {
                 Error::sandbox_misconfiguration(format!(
@@ -194,6 +184,33 @@ impl VirtualScratchDir {
         })?;
         Ok(Self { path: root })
     }
+}
+
+fn create_unique_scratch_dir() -> Result<PathBuf> {
+    let base = std::env::temp_dir();
+    let process_id = std::process::id();
+    for _ in 0..64 {
+        let index = SCRATCH_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                Error::sandbox_misconfiguration(format!("system clock error: {error}"))
+            })?
+            .as_nanos();
+        let root = base.join(format!("heimdall-virtual-{process_id}-{timestamp}-{index}"));
+        match std::fs::create_dir(&root) {
+            Ok(()) => return Ok(root),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(Error::sandbox_misconfiguration(format!(
+                    "failed to create virtual scratch dir: {error}"
+                )));
+            }
+        }
+    }
+    Err(Error::sandbox_misconfiguration(
+        "failed to create unique virtual scratch dir after repeated collisions",
+    ))
 }
 
 impl Drop for VirtualScratchDir {
