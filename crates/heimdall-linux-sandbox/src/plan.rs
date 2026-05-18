@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -363,6 +364,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
         if self.request.network_mode == NetworkMode::Host {
             self.add_host_network_runtime_paths();
         }
+        self.add_agent_runtime_sockets();
         if let Some(home) = dirs_home() {
             for alias in path_aliases(&home) {
                 if alias.is_dir() {
@@ -540,6 +542,12 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"));
     }
 
+    fn add_agent_runtime_sockets(&mut self) {
+        for socket in Self::agent_runtime_sockets() {
+            self.add_runtime_socket(&socket);
+        }
+    }
+
     fn add_resolver_symlink_target(&mut self) {
         let Some(target) = Self::resolver_symlink_target(Path::new("/etc/resolv.conf")) else {
             return;
@@ -564,6 +572,32 @@ impl<'a> BubblewrapArgBuilder<'a> {
             resolv_conf.parent()?.join(target)
         };
         absolute.canonicalize().ok()
+    }
+
+    fn agent_runtime_sockets() -> BTreeSet<PathBuf> {
+        let mut sockets = BTreeSet::new();
+        for key in ["SSH_AUTH_SOCK", "AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
+            if let Some(path) = env_socket_path(env::var_os(key).as_deref()) {
+                sockets.insert(path);
+            }
+        }
+        if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref()) {
+            sockets.insert(path);
+        }
+        if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+            for name in [
+                "S.gpg-agent",
+                "S.gpg-agent.extra",
+                "S.gpg-agent.ssh",
+                "S.gpg-agent.browser",
+            ] {
+                let path = runtime_dir.join("gnupg").join(name);
+                if path.exists() {
+                    sockets.insert(path);
+                }
+            }
+        }
+        sockets
     }
 
     fn add_destination_parent_dirs(&mut self, destination: &Path) {
@@ -655,6 +689,17 @@ fn path_aliases(path: &Path) -> BTreeSet<PathBuf> {
         aliases.insert(canonical);
     }
     aliases
+}
+
+fn env_socket_path(value: Option<&OsStr>) -> Option<PathBuf> {
+    let path = PathBuf::from(value?);
+    (path.is_absolute() && path.exists()).then_some(path)
+}
+
+fn gpg_agent_info_socket(value: Option<&OsStr>) -> Option<PathBuf> {
+    let value = value?.to_string_lossy();
+    let path = value.split(':').next()?;
+    env_socket_path(Some(OsStr::new(path)))
 }
 
 #[cfg(test)]
@@ -828,6 +873,36 @@ mod tests {
             .expect("plan builds");
 
         assert!(!plan.args.iter().any(|arg| arg == "--proc"));
+    }
+
+    #[test]
+    fn agent_socket_env_values_require_existing_absolute_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-agent-socket-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("test dir created");
+        let socket = root.join("agent.sock");
+        std::fs::write(&socket, "placeholder").expect("socket placeholder written");
+
+        assert_eq!(
+            env_socket_path(Some(socket.as_os_str())),
+            Some(socket.clone())
+        );
+        assert_eq!(
+            gpg_agent_info_socket(Some(OsStr::new(&format!("{}:0:1", socket.display())))),
+            Some(socket)
+        );
+        assert_eq!(env_socket_path(Some(OsStr::new("relative.sock"))), None);
+        assert_eq!(
+            env_socket_path(Some(root.join("missing.sock").as_os_str())),
+            None
+        );
+
+        std::fs::remove_dir_all(&root).expect("test dir removed");
     }
 
     #[test]
