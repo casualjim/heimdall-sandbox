@@ -1,8 +1,18 @@
+## [0.1.37] - 2026-05-18
+
+### 🐛 Bug Fixes
+
+- Stage bwrap child mountpoints under denied parents
 ## [0.1.36] - 2026-05-18
 
 ### 🐛 Bug Fixes
 
 - Resolve filesystem policy conflicts by path specificity
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.36 [ci skip]
+- Release version 0.1.36
 ## [0.1.35] - 2026-05-17
 
 ### 🐛 Bug Fixes
