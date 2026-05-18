@@ -537,6 +537,35 @@ fn bubblewrap_writable_patterns_allow_edits_and_creation() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn bubblewrap_denied_parent_allows_specific_writable_child() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-specific-writable");
+    std::fs::create_dir_all(cwd.join(".config/nvim")).expect("directory is created");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","echo edited > .config/nvim/init.vim; touch .config/other || printf blocked"],"filesystem":{{"deny":[".config"],"writable":[".config/nvim"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    let host_contents =
+        std::fs::read_to_string(cwd.join(".config/nvim/init.vim")).expect("file is readable");
+    let other_exists = cwd.join(".config/other").exists();
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "blocked");
+    assert_eq!(host_contents.trim(), "edited");
+    assert!(!other_exists);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn bubblewrap_broad_writable_cwd_allows_regular_writes_and_protects_control_paths() {
     if !bwrap_available() {
         return;
