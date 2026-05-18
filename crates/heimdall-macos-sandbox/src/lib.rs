@@ -162,10 +162,11 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         text.push('\n');
         text.push_str(&self.read_policy());
         let heimdall_wildcard = self.heimdall_wildcard_write_deny_policy();
-        let exclusions = self.write_exclusions();
-        text.push_str(&self.write_policy(&exclusions));
+        let write_exclusions = self.write_exclusions();
+        let deny_exclusions = self.deny_exclusions();
+        text.push_str(&self.write_policy(&write_exclusions));
         text.push_str(&self.platform_writable_policy()?);
-        text.push_str(&self.deny_policy());
+        text.push_str(&self.deny_policy(&deny_exclusions));
         text.push_str(&self.virtual_write_deny_policy());
         text.push_str(&heimdall_wildcard);
         text.push_str(&self.network_policy()?);
@@ -239,7 +240,7 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         exclusions
     }
 
-    fn deny_policy(&mut self) -> String {
+    fn deny_policy(&mut self, exclusions: &BTreeSet<PathBuf>) -> String {
         let mut rules = String::new();
         let deny_targets = std::mem::take(&mut self.targets.deny_targets);
         for denied in deny_targets {
@@ -252,12 +253,26 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
                     "(deny file-write* (literal (param \"{param}\")))\n"
                 ));
                 if alias.is_dir() {
-                    rules.push_str(&format!(
-                        "(deny file-read* (subpath (param \"{param}\")))\n"
-                    ));
-                    rules.push_str(&format!(
-                        "(deny file-write* (subpath (param \"{param}\")))\n"
-                    ));
+                    let subpath_match = format!("(subpath (param \"{param}\"))");
+                    let mut require_parts = vec![subpath_match];
+                    for excluded in exclusions
+                        .iter()
+                        .filter(|excluded| path_has_prefix(excluded, &alias) && *excluded != &alias)
+                    {
+                        let excluded_param = self.path_param("DENY_EXCLUDED", excluded);
+                        require_parts.push(format!(
+                            "(require-not (literal (param \"{excluded_param}\")))"
+                        ));
+                        require_parts.push(format!(
+                            "(require-not (subpath (param \"{excluded_param}\")))"
+                        ));
+                    }
+                    rules.push_str("(deny file-read*\n  (require-all ");
+                    rules.push_str(&require_parts.join(" "));
+                    rules.push_str("))\n");
+                    rules.push_str("(deny file-write*\n  (require-all ");
+                    rules.push_str(&require_parts.join(" "));
+                    rules.push_str("))\n");
                 }
             }
         }
@@ -274,6 +289,14 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
             }
         }
         rules
+    }
+
+    fn deny_exclusions(&self) -> BTreeSet<PathBuf> {
+        let mut exclusions = BTreeSet::new();
+        for writable in &self.targets.writable_targets {
+            exclusions.extend(path_aliases(writable));
+        }
+        exclusions
     }
 
     fn virtual_write_deny_policy(&mut self) -> String {
@@ -616,6 +639,43 @@ mod tests {
             plan.args()
                 .iter()
                 .any(|arg| arg.ends_with(&denied.to_string_lossy().to_string()))
+        );
+    }
+
+    #[test]
+    fn denied_parent_excludes_writable_child() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-seatbelt-specificity-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let denied = root.join("config");
+        let writable = denied.join("nvim");
+        std::fs::create_dir_all(&writable).expect("test dirs created");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![denied.to_string_lossy().to_string()],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = MaterializedFilesystemPolicy::new(
+            BTreeSet::from([denied.clone()]),
+            BTreeSet::from([writable.clone()]),
+            BTreeSet::new(),
+        );
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+        let policy = policy_arg(plan.args());
+
+        assert!(policy.contains("DENY_EXCLUDED_"));
+        assert!(
+            plan.args()
+                .iter()
+                .any(|arg| arg.ends_with(&writable.to_string_lossy().to_string()))
         );
     }
 

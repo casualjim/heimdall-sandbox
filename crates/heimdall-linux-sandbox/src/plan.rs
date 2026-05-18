@@ -8,7 +8,7 @@ use crate::policy::{
     FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy, NetworkMode,
     ProcMode,
 };
-use crate::virtual_files::BubblewrapResources;
+use crate::virtual_files::{BubblewrapResources, VirtualDataFile};
 use crate::{Error, Result};
 
 /// Structured input used to build a Linux bubblewrap invocation.
@@ -192,6 +192,73 @@ impl BubblewrapPlan {
     }
 }
 
+struct PolicyMount<'a> {
+    source: &'a Path,
+    destination: &'a Path,
+    kind: PolicyMountKind,
+}
+
+impl<'a> PolicyMount<'a> {
+    fn writable(path: &'a Path) -> Self {
+        Self {
+            source: path,
+            destination: path,
+            kind: PolicyMountKind::Writable,
+        }
+    }
+
+    fn virtual_file(file: &'a VirtualDataFile) -> Self {
+        Self {
+            source: file.sandbox_path.as_path(),
+            destination: file.sandbox_path.as_path(),
+            kind: PolicyMountKind::VirtualFile { fd: file.fd() },
+        }
+    }
+
+    fn deny(source: &'a Path, destination: &'a Path) -> Self {
+        Self {
+            source,
+            destination,
+            kind: PolicyMountKind::Deny,
+        }
+    }
+
+    fn protected(source: &'a Path, destination: &'a Path) -> Self {
+        Self {
+            source,
+            destination,
+            kind: PolicyMountKind::Protected,
+        }
+    }
+
+    fn sort_key(&self) -> (usize, u8, PathBuf) {
+        (
+            self.destination.components().count(),
+            self.kind.precedence(),
+            self.destination.to_path_buf(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyMountKind {
+    Writable,
+    VirtualFile { fd: i32 },
+    Deny,
+    Protected,
+}
+
+impl PolicyMountKind {
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Writable => 0,
+            Self::VirtualFile { .. } => 1,
+            Self::Deny => 2,
+            Self::Protected => 3,
+        }
+    }
+}
+
 struct BubblewrapArgBuilder<'a> {
     request: &'a BubblewrapRequest<'a>,
     materialized: &'a MaterializedFilesystemPolicy,
@@ -256,33 +323,52 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
     fn add_policy_mounts(&mut self) {
         self.ro_bind(self.request.cwd, self.request.cwd);
-        for writable in self.materialized.writable_targets() {
-            self.bind(writable, writable);
-        }
-
-        for virtual_file in self.resources.virtual_files() {
-            self.args.push("--ro-bind-data".into());
-            self.args.push(virtual_file.fd().to_string().into());
-            self.args
-                .push(virtual_file.sandbox_path.as_os_str().to_os_string());
-        }
 
         let empty_file = self.resources.empty_file();
         let empty_dir = self.resources.empty_dir();
-        for denied in self.materialized.deny_targets() {
-            if denied.is_dir() {
-                self.ro_bind(&empty_dir, denied);
+        let mut mounts = Vec::new();
+        mounts.extend(
+            self.materialized
+                .writable_targets()
+                .iter()
+                .map(|path| PolicyMount::writable(path.as_path())),
+        );
+        mounts.extend(
+            self.resources
+                .virtual_files()
+                .iter()
+                .map(PolicyMount::virtual_file),
+        );
+        mounts.extend(self.materialized.deny_targets().iter().map(|path| {
+            let source = if path.is_dir() {
+                empty_dir.as_path()
             } else {
-                self.ro_bind(&empty_file, denied);
-            }
-        }
-        for protected in self.materialized.protected_targets() {
-            let source = if protected.exists() && !protected.is_dir() {
-                &empty_file
-            } else {
-                &empty_dir
+                empty_file.as_path()
             };
-            self.ro_bind(source, protected);
+            PolicyMount::deny(source, path)
+        }));
+        mounts.extend(self.materialized.protected_targets().iter().map(|path| {
+            let source = if path.exists() && !path.is_dir() {
+                empty_file.as_path()
+            } else {
+                empty_dir.as_path()
+            };
+            PolicyMount::protected(source, path)
+        }));
+        mounts.sort_by_key(PolicyMount::sort_key);
+
+        for mount in mounts {
+            match mount.kind {
+                PolicyMountKind::Writable => self.bind(mount.source, mount.destination),
+                PolicyMountKind::VirtualFile { fd } => {
+                    self.args.push("--ro-bind-data".into());
+                    self.args.push(fd.to_string().into());
+                    self.args.push(mount.destination.as_os_str().to_os_string());
+                }
+                PolicyMountKind::Deny | PolicyMountKind::Protected => {
+                    self.ro_bind(mount.source, mount.destination);
+                }
+            }
         }
     }
 

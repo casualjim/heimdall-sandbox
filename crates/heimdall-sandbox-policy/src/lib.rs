@@ -1,7 +1,7 @@
 //! Shared sandbox policy types and filesystem policy materialization.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -195,7 +195,7 @@ pub struct MaterializedFilesystemPolicy {
 impl MaterializedFilesystemPolicy {
     /// Create a materialized policy from the given target sets.
     ///
-    /// The caller is responsible for ensuring deny precedence over writable targets.
+    /// Backend planners are responsible for ordering targets so the most specific path rule wins.
     #[must_use]
     pub fn new(
         deny_targets: BTreeSet<PathBuf>,
@@ -294,6 +294,8 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         // Add external absolute paths directly as targets.
         self.add_external_targets(self.policy.deny(), &mut deny_targets);
         self.add_external_targets(self.policy.writable(), &mut writable_targets);
+
+        self.apply_literal_specificity(&mut deny_targets, &mut writable_targets);
 
         let protected_targets = self.protected_control_targets(&writable, &deny)?;
 
@@ -417,6 +419,77 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         })
     }
 
+    fn apply_literal_specificity(
+        &self,
+        deny_targets: &mut BTreeSet<PathBuf>,
+        writable_targets: &mut BTreeSet<PathBuf>,
+    ) {
+        let rules = self.literal_rules();
+        if rules.is_empty() {
+            return;
+        }
+
+        let paths = deny_targets
+            .union(writable_targets)
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in paths {
+            let Some(rule) = rules
+                .iter()
+                .filter(|rule| rule.matches(&path))
+                .max_by_key(|rule| (rule.specificity(), rule.kind.precedence()))
+            else {
+                continue;
+            };
+
+            match rule.kind {
+                LiteralRuleKind::Deny => {
+                    writable_targets.remove(&path);
+                    deny_targets.insert(path);
+                }
+                LiteralRuleKind::Writable => {
+                    deny_targets.remove(&path);
+                    writable_targets.insert(path);
+                }
+            }
+        }
+    }
+
+    fn literal_rules(&self) -> Vec<LiteralRule> {
+        self.policy
+            .deny()
+            .iter()
+            .filter_map(|pattern| self.literal_rule(pattern, LiteralRuleKind::Deny))
+            .chain(
+                self.policy
+                    .writable()
+                    .iter()
+                    .filter_map(|pattern| self.literal_rule(pattern, LiteralRuleKind::Writable)),
+            )
+            .collect()
+    }
+
+    fn literal_rule(&self, pattern: &str, kind: LiteralRuleKind) -> Option<LiteralRule> {
+        if is_non_literal_pattern(pattern) {
+            return None;
+        }
+        let home = home_dir();
+        let expanded = match &home {
+            Some(h) => pattern.replace('~', &h.to_string_lossy()),
+            None => pattern.to_string(),
+        };
+        let path = PathBuf::from(expanded);
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            self.cwd.join(path)
+        };
+        Some(LiteralRule {
+            path: absolute,
+            kind,
+        })
+    }
+
     fn protected_control_targets(
         &self,
         writable: &Gitignore,
@@ -501,6 +574,47 @@ pub fn broadly_grants_cwd(patterns: &[String]) -> bool {
 #[must_use]
 pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralRuleKind {
+    Deny,
+    Writable,
+}
+
+impl LiteralRuleKind {
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Writable => 0,
+            Self::Deny => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiteralRule {
+    path: PathBuf,
+    kind: LiteralRuleKind,
+}
+
+impl LiteralRule {
+    fn matches(&self, path: &Path) -> bool {
+        path == self.path || (self.path.is_dir() && path.starts_with(&self.path))
+    }
+
+    fn specificity(&self) -> usize {
+        self.path
+            .components()
+            .filter(|component| !matches!(component, Component::RootDir | Component::Prefix(_)))
+            .count()
+    }
+}
+
+fn is_non_literal_pattern(pattern: &str) -> bool {
+    pattern.starts_with('!')
+        || pattern
+            .chars()
+            .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
 }
 
 fn protected_control_candidate_paths(cwd: &Path) -> Result<BTreeSet<PathBuf>> {
@@ -735,9 +849,32 @@ mod tests {
     }
 
     #[test]
-    fn deny_wins_over_external_writable() {
+    fn longer_writable_path_wins_over_denied_parent() {
+        let cwd = unique_dir("writable-wins-external");
+        let external = std::env::temp_dir().join("heimdall-external-writable-wins-parent");
+        let writable = external.join("writable");
+        std::fs::create_dir_all(&writable).expect("external dirs created");
+
+        let policy = FilesystemPolicy::new(
+            vec![external.to_string_lossy().to_string()],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(materialized.deny_targets().contains(&external));
+        assert!(materialized.writable_targets().contains(&writable));
+        assert!(!materialized.deny_targets().contains(&writable));
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+        std::fs::remove_dir_all(&external).expect("external dir removed");
+    }
+
+    #[test]
+    fn longer_deny_path_wins_over_writable_parent() {
         let cwd = unique_dir("deny-wins-external");
-        // Create an external parent dir and a subdir to deny.
         let external = std::env::temp_dir().join("heimdall-external-deny-wins-parent");
         let secret = external.join("secret");
         std::fs::create_dir_all(&secret).expect("external dirs created");
@@ -752,16 +889,9 @@ mod tests {
             .materialize()
             .expect("policy materializes");
 
-        assert!(
-            materialized.deny_targets().contains(&secret),
-            "denied subdir should be in deny_targets"
-        );
-        assert!(
-            materialized.writable_targets().contains(&external),
-            "parent dir should be in writable_targets"
-        );
-        // The backends handle precedence: deny rules are emitted after writable
-        // rules so seatbelt/bwrap enforce deny over writable.
+        assert!(materialized.deny_targets().contains(&secret));
+        assert!(materialized.writable_targets().contains(&external));
+        assert!(!materialized.writable_targets().contains(&secret));
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
         std::fs::remove_dir_all(&external).expect("external dir removed");
     }

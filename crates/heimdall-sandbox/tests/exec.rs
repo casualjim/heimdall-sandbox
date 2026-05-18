@@ -795,7 +795,7 @@ fn bubblewrap_sees_host_identity_files_when_no_virtual_override() {
     }
     let cwd = unique_temp_dir("bwrap-identity");
     let policy = format!(
-        r#"{{\"cwd\":\"{}\",\"command\":[\"sh\",\"-c\",\"test -r /etc/passwd && test -r /etc/group && printf ok\"],\"filesystem\":{{\"deny\":[\"missing\"]}},\"stdio\":\"piped\"}}"#,
+        r#"{{"cwd":"{}","command":["sh","-c","test -r /etc/passwd && test -r /etc/group && printf ok"],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
         cwd.display()
     );
 
