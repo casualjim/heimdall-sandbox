@@ -208,6 +208,14 @@ impl<'a> PolicyMount<'a> {
         }
     }
 
+    fn readable(path: &'a Path) -> Self {
+        Self {
+            source: path,
+            destination: path,
+            kind: PolicyMountKind::Readable,
+        }
+    }
+
     fn virtual_file(file: &'a VirtualDataFile) -> Self {
         Self {
             source: file.sandbox_path.as_path(),
@@ -256,7 +264,10 @@ impl<'a> PolicyMount<'a> {
     fn mountpoint_kind(&self) -> MountpointKind {
         match self.kind {
             PolicyMountKind::VirtualFile { .. } => MountpointKind::File,
-            PolicyMountKind::Writable | PolicyMountKind::Deny | PolicyMountKind::Protected => {
+            PolicyMountKind::Writable
+            | PolicyMountKind::Readable
+            | PolicyMountKind::Deny
+            | PolicyMountKind::Protected => {
                 if self.source.is_dir() {
                     MountpointKind::Directory
                 } else {
@@ -276,6 +287,7 @@ enum MountpointKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PolicyMountKind {
     Writable,
+    Readable,
     VirtualFile { fd: i32 },
     Deny,
     Protected,
@@ -285,9 +297,10 @@ impl PolicyMountKind {
     const fn precedence(self) -> u8 {
         match self {
             Self::Writable => 0,
-            Self::VirtualFile { .. } => 1,
-            Self::Deny => 2,
-            Self::Protected => 3,
+            Self::Readable => 1,
+            Self::VirtualFile { .. } => 2,
+            Self::Deny => 3,
+            Self::Protected => 4,
         }
     }
 }
@@ -337,6 +350,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
             self.args.extend(os_args(["--proc", "/proc"]));
         }
         self.args.extend(os_args(["--dev", "/dev"]));
+        self.tmpfs_with_perms(Path::new("/tmp"), "1777");
     }
 
     fn add_readonly_base_filesystem(&mut self) {
@@ -365,6 +379,12 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 .writable_targets()
                 .iter()
                 .map(|path| PolicyMount::writable(path.as_path())),
+        );
+        mounts.extend(
+            self.materialized
+                .readable_targets()
+                .iter()
+                .map(|path| PolicyMount::readable(path.as_path())),
         );
         mounts.extend(
             self.resources
@@ -420,6 +440,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
     fn add_policy_mount(&mut self, mount: PolicyMount<'_>) {
         match mount.kind {
             PolicyMountKind::Writable => self.bind(mount.source, mount.destination),
+            PolicyMountKind::Readable => self.ro_bind(mount.source, mount.destination),
             PolicyMountKind::VirtualFile { fd } => {
                 self.args.push("--ro-bind-data".into());
                 self.args.push(fd.to_string().into());
@@ -468,8 +489,18 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "failed to resolve current executable: {error}"
             ))
         })?;
-        let inner_exe = Self::inner_executable(&current_exe);
-        self.ro_bind(&inner_exe, Path::new("/heimdall-inner"));
+        self.ro_bind(&current_exe, Path::new("/heimdall-inner"));
+        for library in Self::runtime_libraries(&current_exe) {
+            self.ro_bind(
+                &library,
+                Path::new("/")
+                    .join(library.file_name().unwrap_or_default())
+                    .as_path(),
+            );
+        }
+        self.args.push("--setenv".into());
+        self.args.push("LD_LIBRARY_PATH".into());
+        self.args.push("/".into());
         self.args.push("--chdir".into());
         self.args.push(self.request.cwd.as_os_str().to_os_string());
         if self.launcher.supports_argv0 {
@@ -489,16 +520,15 @@ impl<'a> BubblewrapArgBuilder<'a> {
         Ok(())
     }
 
-    fn inner_executable(current_exe: &Path) -> PathBuf {
-        let Some(parent) = current_exe.parent() else {
-            return current_exe.to_path_buf();
+    fn runtime_libraries(executable: &Path) -> Vec<PathBuf> {
+        let Some(parent) = executable.parent() else {
+            return Vec::new();
         };
-        let candidate = parent.join("heimdall-sandbox-inner");
-        if candidate.is_file() {
-            candidate
-        } else {
-            current_exe.to_path_buf()
-        }
+        ["libwebgpu_dawn.so"]
+            .into_iter()
+            .map(|name| parent.join(name))
+            .filter(|path| path.is_file())
+            .collect()
     }
 
     fn ro_bind(&mut self, source: &Path, destination: &Path) {
@@ -511,6 +541,12 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
     fn tmpfs(&mut self, destination: &Path) {
         self.single_path_arg("--tmpfs", destination);
+    }
+
+    fn tmpfs_with_perms(&mut self, destination: &Path, permissions: &str) {
+        self.args.push("--perms".into());
+        self.args.push(permissions.into());
+        self.tmpfs(destination);
     }
 
     fn remount_ro(&mut self, destination: &Path) {

@@ -123,6 +123,7 @@ struct DecomposedTargets {
     deny_targets: BTreeSet<PathBuf>,
     writable_targets: BTreeSet<PathBuf>,
     protected_targets: BTreeSet<PathBuf>,
+    readable_targets: BTreeSet<PathBuf>,
 }
 
 struct SeatbeltPolicyBuilder<'a> {
@@ -135,11 +136,13 @@ struct SeatbeltPolicyBuilder<'a> {
 
 impl<'a> SeatbeltPolicyBuilder<'a> {
     fn new(request: &'a SeatbeltRequest<'a>, materialized: MaterializedFilesystemPolicy) -> Self {
+        let readable_targets = materialized.readable_targets().clone();
         let (deny_targets, writable_targets, protected_targets) = materialized.into_parts();
         let targets = DecomposedTargets {
             deny_targets,
             writable_targets,
             protected_targets,
+            readable_targets,
         };
         let home_dir = dirs_home().and_then(|h| {
             let h = h.canonicalize().ok()?;
@@ -295,6 +298,9 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         let mut exclusions = BTreeSet::new();
         for writable in &self.targets.writable_targets {
             exclusions.extend(path_aliases(writable));
+        }
+        for readable in &self.targets.readable_targets {
+            exclusions.extend(path_aliases(readable));
         }
         exclusions
     }
