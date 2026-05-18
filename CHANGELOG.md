@@ -1,8 +1,27 @@
+## [0.1.38] - 2026-05-18
+
+### 🐛 Bug Fixes
+
+- Repair Linux sandbox reentry and deny negation
+- Preserve host resolver runtime in sandbox
+- Preserve host resolver runtime in sandbox
+- Preserve runtime agent sockets in sandbox
+- Avoid virtual scratch directory collisions
+
+### 🧪 Testing
+
+- Cover Linux host network bwrap args
+- Canonicalize resolver symlink expectation
 ## [0.1.37] - 2026-05-18
 
 ### 🐛 Bug Fixes
 
 - Stage bwrap child mountpoints under denied parents
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.37 [ci skip]
+- Release version 0.1.37
 ## [0.1.36] - 2026-05-18
 
 ### 🐛 Bug Fixes
