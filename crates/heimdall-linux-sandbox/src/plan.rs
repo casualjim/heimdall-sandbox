@@ -563,7 +563,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
         } else {
             resolv_conf.parent()?.join(target)
         };
-        absolute.exists().then_some(absolute)
+        absolute.canonicalize().ok()
     }
 
     fn add_destination_parent_dirs(&mut self, destination: &Path) {
@@ -828,6 +828,33 @@ mod tests {
             .expect("plan builds");
 
         assert!(!plan.args.iter().any(|arg| arg == "--proc"));
+    }
+
+    #[test]
+    fn resolver_symlink_target_resolves_relative_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-resolver-link-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let etc = root.join("etc");
+        let run = root.join("run/systemd/resolve");
+        std::fs::create_dir_all(&etc).expect("etc dir created");
+        std::fs::create_dir_all(&run).expect("run dir created");
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.53\n").expect("resolver target written");
+        let link = etc.join("resolv.conf");
+        symlink("../run/systemd/resolve/stub-resolv.conf", &link)
+            .expect("resolver symlink created");
+
+        let resolved = BubblewrapArgBuilder::resolver_symlink_target(&link);
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+
+        assert_eq!(resolved, Some(target));
     }
 
     #[test]
