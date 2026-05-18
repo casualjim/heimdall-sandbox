@@ -50,7 +50,18 @@ fn seatbelt_available() -> bool {
 }
 
 fn run_policy(policy: &str) -> std::process::Output {
-    let mut child = sandbox()
+    run_policy_command(policy, sandbox())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_policy_with_home(policy: &str, home: &std::path::Path) -> std::process::Output {
+    let mut command = sandbox();
+    command.env("HOME", home);
+    run_policy_command(policy, command)
+}
+
+fn run_policy_command(policy: &str, mut command: Command) -> std::process::Output {
+    let mut child = command
         .args(["exec", "--policy", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -64,6 +75,28 @@ fn run_policy(policy: &str) -> std::process::Output {
         .write_all(policy.as_bytes())
         .expect("policy write succeeds");
     child.wait_with_output().expect("sandbox command exits")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sandbox_backend_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        bwrap_available()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        seatbelt_available()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn unique_home_dir(name: &str) -> std::path::PathBuf {
+    unique_temp_dir(name)
+}
+
+#[cfg(target_os = "macos")]
+fn unique_home_dir(name: &str) -> std::path::PathBuf {
+    unique_project_dir(name)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -535,6 +568,189 @@ fn bubblewrap_writable_patterns_allow_edits_and_creation() {
     assert_eq!(host_contents.trim(), "edited");
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn home_policy(
+    home: &std::path::Path,
+    command: &str,
+    deny: Vec<&str>,
+    writable: Vec<&str>,
+) -> String {
+    serde_json::json!({
+        "cwd": home,
+        "command": ["sh", "-c", command],
+        "filesystem": {
+            "deny": deny,
+            "writable": writable,
+        },
+        "stdio": "piped",
+    })
+    .to_string()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn setup_config_home(name: &str) -> std::path::PathBuf {
+    let home = unique_home_dir(name);
+    std::fs::create_dir_all(home.join(".config/nvim")).expect("nvim dir is created");
+    std::fs::create_dir_all(home.join(".config/not-denied")).expect("restore dir is created");
+    std::fs::create_dir_all(home.join(".config/foo")).expect("nested dir is created");
+    std::fs::write(home.join(".config/nvim/init.lua"), "nvim-secret")
+        .expect("nvim file is written");
+    std::fs::write(home.join(".config/other"), "other-secret").expect("sibling is written");
+    std::fs::write(home.join(".config/not-denied/readme"), "dir-visible")
+        .expect("restore dir file is written");
+    std::fs::write(home.join(".config/not-denied.txt"), "file-visible")
+        .expect("restore file is written");
+    std::fs::write(home.join(".config/foo/bar.json"), "nested-visible")
+        .expect("nested restored file is written");
+    std::fs::write(home.join(".config/foo/secret.json"), "nested-secret")
+        .expect("nested sibling is written");
+    home
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn denied_parent_with_redundant_denied_child_does_not_fail() {
+    if !sandbox_backend_available() {
+        return;
+    }
+    let home = setup_config_home("policy-redundant-deny");
+    let policy = home_policy(
+        &home,
+        "cat .config/nvim/init.lua 2>/dev/null && printf leak || printf denied",
+        vec!["~/.config", "~/.config/nvim"],
+        Vec::new(),
+    );
+
+    let output = run_policy_with_home(&policy, &home);
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "denied");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn negated_denied_directory_is_restored_readonly() {
+    if !sandbox_backend_available() {
+        return;
+    }
+    let home = setup_config_home("policy-negated-dir");
+    let policy = home_policy(
+        &home,
+        "cat .config/not-denied/readme; echo new > .config/not-denied/new 2>/dev/null || printf :readonly; cat .config/nvim/init.lua 2>/dev/null && printf :nvim-leak || printf :nvim-denied; cat .config/other 2>/dev/null && printf :other-leak || printf :other-denied",
+        vec!["~/.config", "~/.config/nvim", "!~/.config/not-denied"],
+        Vec::new(),
+    );
+
+    let output = run_policy_with_home(&policy, &home);
+    let restored_write_exists = home.join(".config/not-denied/new").exists();
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "dir-visible:readonly:nvim-denied:other-denied"
+    );
+    assert!(!restored_write_exists);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn negated_denied_file_is_restored_readonly() {
+    if !sandbox_backend_available() {
+        return;
+    }
+    let home = setup_config_home("policy-negated-file");
+    let policy = home_policy(
+        &home,
+        "cat .config/not-denied.txt; echo new > .config/not-denied.txt 2>/dev/null || printf :readonly; cat .config/other 2>/dev/null && printf :other-leak || printf :other-denied",
+        vec!["~/.config", "!~/.config/not-denied.txt"],
+        Vec::new(),
+    );
+
+    let output = run_policy_with_home(&policy, &home);
+    let restored_contents =
+        std::fs::read_to_string(home.join(".config/not-denied.txt")).expect("file is readable");
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "file-visible:readonly:other-denied"
+    );
+    assert_eq!(restored_contents, "file-visible");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn nested_negated_denied_file_restores_only_that_file() {
+    if !sandbox_backend_available() {
+        return;
+    }
+    let home = setup_config_home("policy-negated-nested-file");
+    let policy = home_policy(
+        &home,
+        "cat .config/foo/bar.json; cat .config/foo/secret.json 2>/dev/null && printf :secret-leak || printf :secret-denied; echo new > .config/foo/new.json 2>/dev/null || printf :readonly",
+        vec!["~/.config", "!~/.config/foo/bar.json"],
+        Vec::new(),
+    );
+
+    let output = run_policy_with_home(&policy, &home);
+    let new_file_exists = home.join(".config/foo/new.json").exists();
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "nested-visible:secret-denied:readonly"
+    );
+    assert!(!new_file_exists);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn writable_child_under_denied_parent_requires_writable_policy() {
+    if !sandbox_backend_available() {
+        return;
+    }
+    let home = setup_config_home("policy-explicit-writable-child");
+    let policy = home_policy(
+        &home,
+        "echo edited > .config/not-denied/new; cat .config/other 2>/dev/null && printf :other-leak || printf :other-denied",
+        vec!["~/.config"],
+        vec!["~/.config/not-denied"],
+    );
+
+    let output = run_policy_with_home(&policy, &home);
+    let written_contents = std::fs::read_to_string(home.join(".config/not-denied/new"))
+        .expect("writable exception file is readable");
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), ":other-denied");
+    assert_eq!(written_contents.trim(), "edited");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn bubblewrap_denied_parent_allows_specific_writable_child() {
@@ -602,6 +818,29 @@ fn bubblewrap_broad_writable_cwd_allows_regular_writes_and_protects_control_path
     assert!(!deny_exists);
     assert!(!write_exists);
     assert!(!heimdall_local_exists);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_provides_private_writable_tmp() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-private-tmp");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","tmp=$(mktemp /tmp/heimdall.XXXXXX) && printf ok > \"$tmp\" && cat \"$tmp\""],"filesystem":{{"deny":["missing"]}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok");
 }
 
 #[cfg(target_os = "linux")]

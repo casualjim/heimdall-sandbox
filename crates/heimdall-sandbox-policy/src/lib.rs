@@ -190,6 +190,7 @@ pub struct MaterializedFilesystemPolicy {
     deny_targets: BTreeSet<PathBuf>,
     writable_targets: BTreeSet<PathBuf>,
     protected_targets: BTreeSet<PathBuf>,
+    readable_targets: BTreeSet<PathBuf>,
 }
 
 impl MaterializedFilesystemPolicy {
@@ -206,6 +207,7 @@ impl MaterializedFilesystemPolicy {
             deny_targets,
             writable_targets,
             protected_targets,
+            readable_targets: BTreeSet::new(),
         }
     }
 
@@ -216,6 +218,7 @@ impl MaterializedFilesystemPolicy {
             deny_targets: BTreeSet::new(),
             writable_targets: BTreeSet::new(),
             protected_targets: BTreeSet::new(),
+            readable_targets: BTreeSet::new(),
         }
     }
 
@@ -235,6 +238,12 @@ impl MaterializedFilesystemPolicy {
     #[must_use]
     pub fn protected_targets(&self) -> &BTreeSet<PathBuf> {
         &self.protected_targets
+    }
+
+    /// Existing paths explicitly restored by deny-policy negation rules.
+    #[must_use]
+    pub fn readable_targets(&self) -> &BTreeSet<PathBuf> {
+        &self.readable_targets
     }
 
     /// Decompose into owned target sets.
@@ -296,6 +305,8 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         self.add_external_targets(self.policy.writable(), &mut writable_targets);
 
         self.apply_literal_specificity(&mut deny_targets, &mut writable_targets);
+        let readable_targets = self.readable_targets(&deny_targets);
+        self.prune_redundant_deny_targets(&mut deny_targets);
 
         let protected_targets = self.protected_control_targets(&writable, &deny)?;
 
@@ -303,6 +314,7 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             deny_targets,
             writable_targets,
             protected_targets,
+            readable_targets,
         })
     }
 
@@ -320,9 +332,32 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
                 Some(h) => pattern.replace('~', &h.to_string_lossy()),
                 None => pattern.clone(),
             };
-            result.push(expanded);
+            result.push(self.matcher_pattern(&expanded));
         }
         result
+    }
+
+    fn matcher_pattern(&self, pattern: &str) -> String {
+        let Some(body) = pattern.strip_prefix('!') else {
+            return self
+                .cwd_relative_absolute_pattern(pattern)
+                .unwrap_or_else(|| pattern.to_string());
+        };
+        self.cwd_relative_absolute_pattern(body)
+            .map(|relative| format!("!{relative}"))
+            .unwrap_or_else(|| pattern.to_string())
+    }
+
+    fn cwd_relative_absolute_pattern(&self, pattern: &str) -> Option<String> {
+        let path = Path::new(pattern);
+        if !path.is_absolute() || !path.starts_with(self.cwd) {
+            return None;
+        }
+        let relative = path.strip_prefix(self.cwd).ok()?;
+        if relative.as_os_str().is_empty() {
+            return Some(".".to_string());
+        }
+        Some(relative.to_string_lossy().to_string())
     }
 
     /// Add external absolute patterns directly as targets.
@@ -473,20 +508,37 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         if is_non_literal_pattern(pattern) {
             return None;
         }
+        self.literal_path(pattern)
+            .map(|path| LiteralRule { path, kind })
+    }
+
+    fn readable_targets(&self, deny_targets: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+        self.policy
+            .deny()
+            .iter()
+            .filter_map(|pattern| pattern.strip_prefix('!'))
+            .filter(|pattern| !is_non_literal_pattern(pattern))
+            .filter_map(|pattern| self.literal_path(pattern))
+            .filter(|path| path.exists() && has_denied_directory_ancestor(path, deny_targets))
+            .collect()
+    }
+
+    fn prune_redundant_deny_targets(&self, deny_targets: &mut BTreeSet<PathBuf>) {
+        let original = deny_targets.clone();
+        deny_targets.retain(|target| !has_denied_directory_ancestor(target, &original));
+    }
+
+    fn literal_path(&self, pattern: &str) -> Option<PathBuf> {
         let home = home_dir();
         let expanded = match &home {
             Some(h) => pattern.replace('~', &h.to_string_lossy()),
             None => pattern.to_string(),
         };
         let path = PathBuf::from(expanded);
-        let absolute = if path.is_absolute() {
+        Some(if path.is_absolute() {
             path
         } else {
             self.cwd.join(path)
-        };
-        Some(LiteralRule {
-            path: absolute,
-            kind,
         })
     }
 
@@ -615,6 +667,12 @@ fn is_non_literal_pattern(pattern: &str) -> bool {
         || pattern
             .chars()
             .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+}
+
+fn has_denied_directory_ancestor(path: &Path, deny_targets: &BTreeSet<PathBuf>) -> bool {
+    path.ancestors()
+        .skip(1)
+        .any(|ancestor| deny_targets.contains(ancestor) && ancestor.is_dir())
 }
 
 fn protected_control_candidate_paths(cwd: &Path) -> Result<BTreeSet<PathBuf>> {

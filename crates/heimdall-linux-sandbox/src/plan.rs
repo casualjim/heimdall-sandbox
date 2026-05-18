@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::env;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -208,6 +210,14 @@ impl<'a> PolicyMount<'a> {
         }
     }
 
+    fn readable(path: &'a Path) -> Self {
+        Self {
+            source: path,
+            destination: path,
+            kind: PolicyMountKind::Readable,
+        }
+    }
+
     fn virtual_file(file: &'a VirtualDataFile) -> Self {
         Self {
             source: file.sandbox_path.as_path(),
@@ -256,7 +266,10 @@ impl<'a> PolicyMount<'a> {
     fn mountpoint_kind(&self) -> MountpointKind {
         match self.kind {
             PolicyMountKind::VirtualFile { .. } => MountpointKind::File,
-            PolicyMountKind::Writable | PolicyMountKind::Deny | PolicyMountKind::Protected => {
+            PolicyMountKind::Writable
+            | PolicyMountKind::Readable
+            | PolicyMountKind::Deny
+            | PolicyMountKind::Protected => {
                 if self.source.is_dir() {
                     MountpointKind::Directory
                 } else {
@@ -276,6 +289,7 @@ enum MountpointKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PolicyMountKind {
     Writable,
+    Readable,
     VirtualFile { fd: i32 },
     Deny,
     Protected,
@@ -285,9 +299,10 @@ impl PolicyMountKind {
     const fn precedence(self) -> u8 {
         match self {
             Self::Writable => 0,
-            Self::VirtualFile { .. } => 1,
-            Self::Deny => 2,
-            Self::Protected => 3,
+            Self::Readable => 1,
+            Self::VirtualFile { .. } => 2,
+            Self::Deny => 3,
+            Self::Protected => 4,
         }
     }
 }
@@ -337,6 +352,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
             self.args.extend(os_args(["--proc", "/proc"]));
         }
         self.args.extend(os_args(["--dev", "/dev"]));
+        self.tmpfs_with_perms(Path::new("/tmp"), "1777");
     }
 
     fn add_readonly_base_filesystem(&mut self) {
@@ -345,6 +361,10 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 self.ro_bind(&root, &root);
             }
         }
+        if self.request.network_mode == NetworkMode::Host {
+            self.add_host_network_runtime_paths();
+        }
+        self.add_agent_runtime_sockets();
         if let Some(home) = dirs_home() {
             for alias in path_aliases(&home) {
                 if alias.is_dir() {
@@ -365,6 +385,12 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 .writable_targets()
                 .iter()
                 .map(|path| PolicyMount::writable(path.as_path())),
+        );
+        mounts.extend(
+            self.materialized
+                .readable_targets()
+                .iter()
+                .map(|path| PolicyMount::readable(path.as_path())),
         );
         mounts.extend(
             self.resources
@@ -420,6 +446,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
     fn add_policy_mount(&mut self, mount: PolicyMount<'_>) {
         match mount.kind {
             PolicyMountKind::Writable => self.bind(mount.source, mount.destination),
+            PolicyMountKind::Readable => self.ro_bind(mount.source, mount.destination),
             PolicyMountKind::VirtualFile { fd } => {
                 self.args.push("--ro-bind-data".into());
                 self.args.push(fd.to_string().into());
@@ -468,8 +495,18 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "failed to resolve current executable: {error}"
             ))
         })?;
-        let inner_exe = Self::inner_executable(&current_exe);
-        self.ro_bind(&inner_exe, Path::new("/heimdall-inner"));
+        self.ro_bind(&current_exe, Path::new("/heimdall-inner"));
+        for library in Self::runtime_libraries(&current_exe) {
+            self.ro_bind(
+                &library,
+                Path::new("/")
+                    .join(library.file_name().unwrap_or_default())
+                    .as_path(),
+            );
+        }
+        self.args.push("--setenv".into());
+        self.args.push("LD_LIBRARY_PATH".into());
+        self.args.push("/".into());
         self.args.push("--chdir".into());
         self.args.push(self.request.cwd.as_os_str().to_os_string());
         if self.launcher.supports_argv0 {
@@ -489,15 +526,96 @@ impl<'a> BubblewrapArgBuilder<'a> {
         Ok(())
     }
 
-    fn inner_executable(current_exe: &Path) -> PathBuf {
-        let Some(parent) = current_exe.parent() else {
-            return current_exe.to_path_buf();
+    fn runtime_libraries(executable: &Path) -> Vec<PathBuf> {
+        let Some(parent) = executable.parent() else {
+            return Vec::new();
         };
-        let candidate = parent.join("heimdall-sandbox-inner");
-        if candidate.is_file() {
-            candidate
+        ["libwebgpu_dawn.so"]
+            .into_iter()
+            .map(|name| parent.join(name))
+            .filter(|path| path.is_file())
+            .collect()
+    }
+
+    fn add_host_network_runtime_paths(&mut self) {
+        self.add_resolver_symlink_target();
+        self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"));
+    }
+
+    fn add_agent_runtime_sockets(&mut self) {
+        for socket in Self::agent_runtime_sockets() {
+            self.add_runtime_socket(&socket);
+        }
+    }
+
+    fn add_resolver_symlink_target(&mut self) {
+        let Some(target) = Self::resolver_symlink_target(Path::new("/etc/resolv.conf")) else {
+            return;
+        };
+        self.add_destination_parent_dirs(&target);
+        self.ro_bind(&target, &target);
+    }
+
+    fn add_runtime_socket(&mut self, socket: &Path) {
+        if !socket.exists() {
+            return;
+        }
+        self.add_destination_parent_dirs(socket);
+        self.bind(socket, socket);
+    }
+
+    fn resolver_symlink_target(resolv_conf: &Path) -> Option<PathBuf> {
+        let target = fs::read_link(resolv_conf).ok()?;
+        let absolute = if target.is_absolute() {
+            target
         } else {
-            current_exe.to_path_buf()
+            resolv_conf.parent()?.join(target)
+        };
+        absolute.canonicalize().ok()
+    }
+
+    fn agent_runtime_sockets() -> BTreeSet<PathBuf> {
+        let mut sockets = BTreeSet::new();
+        for key in ["SSH_AUTH_SOCK", "AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
+            if let Some(path) = env_socket_path(env::var_os(key).as_deref()) {
+                sockets.insert(path);
+            }
+        }
+        if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref()) {
+            sockets.insert(path);
+        }
+        if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+            for name in [
+                "S.gpg-agent",
+                "S.gpg-agent.extra",
+                "S.gpg-agent.ssh",
+                "S.gpg-agent.browser",
+            ] {
+                let path = runtime_dir.join("gnupg").join(name);
+                if path.exists() {
+                    sockets.insert(path);
+                }
+            }
+        }
+        sockets
+    }
+
+    fn add_destination_parent_dirs(&mut self, destination: &Path) {
+        let Some(parent) = destination.parent() else {
+            return;
+        };
+        let mut directories = Vec::new();
+        let mut current = parent;
+        while current != Path::new("/") {
+            directories.push(current.to_path_buf());
+            let Some(next) = current.parent() else {
+                break;
+            };
+            current = next;
+        }
+        directories.reverse();
+        for directory in directories {
+            self.dir(&directory);
         }
     }
 
@@ -511,6 +629,12 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
     fn tmpfs(&mut self, destination: &Path) {
         self.single_path_arg("--tmpfs", destination);
+    }
+
+    fn tmpfs_with_perms(&mut self, destination: &Path, permissions: &str) {
+        self.args.push("--perms".into());
+        self.args.push(permissions.into());
+        self.tmpfs(destination);
     }
 
     fn remount_ro(&mut self, destination: &Path) {
@@ -567,6 +691,17 @@ fn path_aliases(path: &Path) -> BTreeSet<PathBuf> {
     aliases
 }
 
+fn env_socket_path(value: Option<&OsStr>) -> Option<PathBuf> {
+    let path = PathBuf::from(value?);
+    (path.is_absolute() && path.exists()).then_some(path)
+}
+
+fn gpg_agent_info_socket(value: Option<&OsStr>) -> Option<PathBuf> {
+    let value = value?.to_string_lossy();
+    let path = value.split(':').next()?;
+    env_socket_path(Some(OsStr::new(path)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -597,6 +732,24 @@ mod tests {
             .expect("plan builds");
 
         assert!(plan.args.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
+    fn network_host_omits_unshare_net() {
+        let cwd = std::env::current_dir().expect("cwd exists");
+        let request = BubblewrapRequest {
+            cwd: &cwd,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &FilesystemPolicy::default(),
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .expect("plan builds");
+
+        assert!(!plan.args.iter().any(|arg| arg == "--unshare-net"));
     }
 
     #[test]
@@ -720,6 +873,64 @@ mod tests {
             .expect("plan builds");
 
         assert!(!plan.args.iter().any(|arg| arg == "--proc"));
+    }
+
+    #[test]
+    fn agent_socket_env_values_require_existing_absolute_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-agent-socket-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("test dir created");
+        let socket = root.join("agent.sock");
+        std::fs::write(&socket, "placeholder").expect("socket placeholder written");
+
+        assert_eq!(
+            env_socket_path(Some(socket.as_os_str())),
+            Some(socket.clone())
+        );
+        assert_eq!(
+            gpg_agent_info_socket(Some(OsStr::new(&format!("{}:0:1", socket.display())))),
+            Some(socket)
+        );
+        assert_eq!(env_socket_path(Some(OsStr::new("relative.sock"))), None);
+        assert_eq!(
+            env_socket_path(Some(root.join("missing.sock").as_os_str())),
+            None
+        );
+
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+    }
+
+    #[test]
+    fn resolver_symlink_target_resolves_relative_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-resolver-link-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let etc = root.join("etc");
+        let run = root.join("run/systemd/resolve");
+        std::fs::create_dir_all(&etc).expect("etc dir created");
+        std::fs::create_dir_all(&run).expect("run dir created");
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.53\n").expect("resolver target written");
+        let link = etc.join("resolv.conf");
+        symlink("../run/systemd/resolve/stub-resolv.conf", &link)
+            .expect("resolver symlink created");
+
+        let expected = target.canonicalize().expect("target canonicalizes");
+        let resolved = BubblewrapArgBuilder::resolver_symlink_target(&link);
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+
+        assert_eq!(resolved, Some(expected));
     }
 
     #[test]
