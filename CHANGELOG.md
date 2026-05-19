@@ -1,3 +1,8 @@
+## [0.1.39] - 2026-05-19
+
+### 🐛 Bug Fixes
+
+- Stop patching deleted Homebrew binary
 ## [0.1.38] - 2026-05-18
 
 ### 🐛 Bug Fixes
@@ -12,6 +17,11 @@
 
 - Cover Linux host network bwrap args
 - Canonicalize resolver symlink expectation
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.38 [ci skip]
+- Release version 0.1.38
 ## [0.1.37] - 2026-05-18
 
 ### 🐛 Bug Fixes
