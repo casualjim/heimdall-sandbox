@@ -11,12 +11,10 @@ patch = <<~PATCH
 
     # Add rpath so binaries find the shared library in Homebrew's lib directory.
     if OS.mac?
-      %w[heimdall-sandbox heimdall-sandbox-inner].each do |binary|
-        p = "\#{bin}/\#{binary}"
-        chmod "+w", p
-        MachO::Tools.add_rpath(p, "@loader_path/../lib", :max_align)
-        system "codesign", "--force", "--sign", "-", p
-      end
+      p = "\#{bin}/heimdall-sandbox"
+      chmod "+w", p
+      MachO::Tools.add_rpath(p, "@loader_path/../lib", :max_align)
+      system "codesign", "--force", "--sign", "-", p
     end
 PATCH
 
