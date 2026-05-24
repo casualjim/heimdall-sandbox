@@ -670,6 +670,47 @@ fn bubblewrap_missing_home_deny_outside_writable_blocks_creation() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn bubblewrap_denied_home_symlink_directory_does_not_block_startup() {
+    use std::os::unix::fs::symlink;
+
+    if !bwrap_available() {
+        return;
+    }
+    let home = unique_home_dir("bwrap-denied-home-symlink");
+    let target = home.join("real-vim");
+    std::fs::create_dir(&target).expect("symlink target is created");
+    std::fs::write(target.join("init.vim"), "secret").expect("target file is written");
+    symlink(&target, home.join(".vim")).expect("home symlink is created");
+    let policy = serde_json::json!({
+        "cwd": home,
+        "command": [
+            "sh",
+            "-c",
+            "cat ~/.vim/init.vim 2>/dev/null && printf leak || printf denied",
+        ],
+        "filesystem": {
+            "deny": ["~/.vim"],
+        },
+        "stdio": "piped",
+    })
+    .to_string();
+
+    let output = run_policy_with_home(&policy, &home);
+    let host_contents = std::fs::read_to_string(target.join("init.vim"))
+        .expect("host symlink target remains readable");
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "denied");
+    assert_eq!(host_contents, "secret");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn bubblewrap_mixed_existing_and_missing_home_denies_are_enforced() {
     if !bwrap_available() {
         return;
