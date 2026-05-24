@@ -1445,4 +1445,49 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).expect("test dirs removed");
     }
+
+    #[test]
+    fn negated_absolute_deny_is_not_rendered_as_bubblewrap_mask() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-negated-deny-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let denied = root.join("denied");
+        std::fs::create_dir_all(&denied).expect("denied dir created");
+        let policy = FilesystemPolicy::new(
+            vec![
+                denied.to_string_lossy().to_string(),
+                format!("!{}", denied.display()),
+            ],
+            Vec::new(),
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &policy)
+            .materialize()
+            .expect("policy materializes");
+        let request = BubblewrapRequest {
+            cwd: &root,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &policy,
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(materialized, existing_bwrap_path())
+            .expect("plan builds");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(!args.windows(3).any(|w| {
+            (w[0] == "--ro-bind" || w[0] == "--bind") && w[2] == denied.to_string_lossy()
+        }));
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+    }
 }
