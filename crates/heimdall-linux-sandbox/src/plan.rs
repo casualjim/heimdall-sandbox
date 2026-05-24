@@ -368,7 +368,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.validate_required_startup_paths()?;
         self.add_namespaces();
         self.add_readonly_base_filesystem()?;
-        self.add_policy_mounts();
+        self.add_policy_mounts()?;
         self.add_inner_reentry()?;
         Ok(self.args)
     }
@@ -416,7 +416,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
         Ok(())
     }
 
-    fn add_policy_mounts(&mut self) {
+    fn add_policy_mounts(&mut self) -> Result<()> {
         self.ro_bind(self.request.cwd, self.request.cwd);
 
         let empty_file = self.resources.empty_file();
@@ -510,29 +510,39 @@ impl<'a> BubblewrapArgBuilder<'a> {
                     self.add_staged_mountpoint(mount.destination, candidate, &empty_file);
                     self.ro_bind(candidate.source, candidate.destination);
                 }
-                self.add_policy_mount(mount);
+                self.add_policy_mount(mount)?;
                 continue;
             }
 
-            self.add_policy_mount(mount);
+            self.add_policy_mount(mount)?;
         }
+        Ok(())
     }
 
-    fn add_policy_mount(&mut self, mount: PolicyMount<'_>) {
+    fn add_policy_mount(&mut self, mount: PolicyMount<'_>) -> Result<()> {
         match mount.kind {
-            PolicyMountKind::Writable => self.bind(mount.source, mount.destination),
-            PolicyMountKind::Readable => self.ro_bind(mount.source, mount.destination),
+            PolicyMountKind::Writable => {
+                let destination = bubblewrap_mount_destination(mount.destination)?;
+                self.bind(mount.source, &destination);
+            }
+            PolicyMountKind::Readable => {
+                let destination = bubblewrap_mount_destination(mount.destination)?;
+                self.ro_bind(mount.source, &destination);
+            }
             PolicyMountKind::VirtualFile { fd } => {
                 self.args.push("--ro-bind-data".into());
                 self.args.push(fd.to_string().into());
                 self.args.push(mount.destination.as_os_str().to_os_string());
             }
-            PolicyMountKind::Deny
-            | PolicyMountKind::Protected
-            | PolicyMountKind::MissingDenyGuard => {
+            PolicyMountKind::Deny | PolicyMountKind::Protected => {
+                let destination = bubblewrap_mount_destination(mount.destination)?;
+                self.ro_bind(mount.source, &destination);
+            }
+            PolicyMountKind::MissingDenyGuard => {
                 self.ro_bind(mount.source, mount.destination);
             }
         }
+        Ok(())
     }
 
     fn add_staged_mountpoint(&mut self, mask: &Path, mount: &PolicyMount<'_>, empty_file: &Path) {
@@ -806,6 +816,30 @@ fn optional_path_exists(path: &Path) -> Result<bool> {
     concrete_path_state(path)
         .map(|state| matches!(state, heimdall_sandbox_policy::ConcretePathState::Existing))
         .map_err(Into::into)
+}
+
+fn bubblewrap_mount_destination(path: &Path) -> Result<PathBuf> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(path.to_path_buf());
+        }
+        Err(error) => {
+            return Err(Error::sandbox_misconfiguration(format!(
+                "failed to inspect bubblewrap mount destination {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(path.to_path_buf());
+    }
+    path.canonicalize().map_err(|error| {
+        Error::sandbox_misconfiguration(format!(
+            "failed to resolve symlink bubblewrap mount destination {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn required_path_exists(path: &Path) -> Result<()> {
