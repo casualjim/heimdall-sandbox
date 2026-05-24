@@ -1,8 +1,22 @@
+## [0.1.42] - 2026-05-24
+
+### 🐛 Bug Fixes
+
+- Honor final deny negations
+
+### ⚙️ Miscellaneous Tasks
+
+- Retry flaky tests
 ## [0.1.41] - 2026-05-24
 
 ### 🐛 Bug Fixes
 
 - Handle symlinked deny mount destinations
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.41 [ci skip]
+- Release version 0.1.41
 ## [0.1.40] - 2026-05-24
 
 ### 🐛 Bug Fixes
