@@ -21,8 +21,9 @@ This change covers concrete absolute host paths after tilde expansion, including
 - Indeterminate paths fail planning with sandbox misconfiguration.
 - A final path component that exists as a symlink, including a dangling symlink, is existing rather than missing.
 - Protected-control targets and virtual-file targets keep their current special behavior.
-- The implementation must not create missing host paths on the real host filesystem.
-- The implementation must not rely on post-execution cleanup of arbitrary user paths.
+- The implementation must not create missing ordinary host-backed writable or restored-readonly paths on the real host filesystem.
+- Linux missing-deny guards under writable parents may use Bubblewrap-created empty mountpoint directories as transient construction artifacts when Bubblewrap requires a bind destination inside the writable tree.
+- Post-execution cleanup is allowed only for those bounded Linux missing-deny guard mountpoint artifacts, and only as empty-directory cleanup; it must not remove arbitrary user content.
 
 ## Concrete Path Classification
 
@@ -69,18 +70,18 @@ Linux planning handles materialized targets as follows:
 
 ### Staged synthetic prevention for missing deny guards
 
-For a missing deny guard at `<writable-parent>/denied`, Linux uses Bubblewrap argument ordering and existing synthetic resource helpers to construct the denied path in sandbox namespace state, then masks it above the writable parent view. The implementation must use Bubblewrap sandbox construction primitives such as staged mountpoints, tmpfs, synthetic data/file resources, and empty file/directory masks; it must not create `<writable-parent>/denied` on the real host filesystem.
+For a missing deny guard at `<writable-parent>/denied`, Linux uses Bubblewrap argument ordering and existing synthetic resource helpers to construct the denied path in sandbox namespace state, then masks it above the writable parent view. The implementation must use Bubblewrap sandbox construction primitives such as staged mountpoints, tmpfs, synthetic data/file resources, and empty file/directory masks. Because Bubblewrap creates bind destinations in the active sandbox view, a missing guard below a host-backed writable parent may appear as an empty mountpoint directory on the host during setup; that transient artifact is part of the accepted tmpfs/staged-mount design when it is removed after the sandbox exits.
 
 The required outcome is:
 
 1. the effective writable parent remains available with its existing writable behavior;
 2. the denied missing child is represented only inside the sandbox namespace;
 3. the final layer at the denied child path prevents host-data reads and prevents creating or writing that path through the writable parent;
-4. the denied child path remains absent on the host after planning and execution.
+4. the denied child path is not left behind on the host after sandbox execution and bounded missing-guard cleanup.
 
 Because no host object exists at the denied path, the Linux guard is not required to make every possible read/open syscall fail; it is required to prevent host content exposure and block creation/writes through the writable parent. An empty synthetic mask is acceptable when it satisfies those outcomes.
 
-The existing staged mountpoint pattern in Linux planning is the integration point. The implementation may extend that staging logic for this inverse case, but tests must prove the host path is not created and the guard remains effective after writable parent setup.
+The existing staged mountpoint pattern in Linux planning is the integration point. The implementation may extend that staging logic for this inverse case, and tests must prove the guard remains effective after writable parent setup and that any empty mountpoint artifact is removed after sandbox teardown.
 
 ## Linux Support Mounts
 
@@ -114,13 +115,13 @@ macOS does not need synthetic directories or mount staging because Seatbelt is p
 
 - **Skip every missing deny path.** Rejected because a writable directory could create a path the policy explicitly denies.
 - **Reject missing deny paths under writable coverage.** Rejected because deny-over-writable is an existing policy rule and Bubblewrap can construct sandbox namespace state using ordered synthetic/staged mounts.
-- **Delete created paths after execution.** Rejected because sandbox ownership of arbitrary paths cannot be proven and cleanup can race with host processes.
-- **Create missing host paths before sandbox startup.** Rejected because sandbox planning must not mutate the host to make policy enforcement possible.
+- **Delete arbitrary created paths after execution.** Rejected because sandbox ownership of arbitrary paths cannot be proven and cleanup can race with host processes. Bounded empty-directory cleanup for Linux missing-deny guard mountpoint artifacts is accepted because it is tied to a specific confirmed-missing guard under a writable policy root and does not remove user content.
+- **Create missing host paths before sandbox startup.** Rejected because sandbox planning must not mutate the host to make policy enforcement possible. Bubblewrap-created empty mountpoint artifacts for missing-deny guards are a runtime staging side effect, not a planning-time host path creation strategy.
 - **Fail on all missing concrete paths.** Rejected because shared policies commonly include optional host paths.
 
 ## Risks / Trade-offs
 
-- Linux missing-deny guards require careful Bubblewrap argument ordering. Regression tests must prove the guard blocks access and no host path is created.
-- The synthetic Linux guard may make an explicitly denied missing path observable inside the sandbox as denied/synthetic state. That is acceptable because the path is explicitly denied and the host path remains absent.
+- Linux missing-deny guards require careful Bubblewrap argument ordering. Regression tests must prove the guard blocks access and any empty mountpoint artifact is removed after execution.
+- The synthetic Linux guard may make an explicitly denied missing path observable inside the sandbox as denied/synthetic state. That is acceptable because the path is explicitly denied and no persistent host path is left behind.
 - macOS can enforce the same policy intent without staging because Seatbelt rules do not require mount destinations.
 - Existence checks must distinguish confirmed missing from indeterminate errors so sensitive existing paths are not silently skipped.

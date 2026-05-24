@@ -363,8 +363,8 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
 
         let mut deny_targets = BTreeSet::new();
         let mut writable_targets = BTreeSet::new();
-        let cwd_is_covered =
-            broadly_grants_cwd(self.policy.writable()) || self.cwd_covered_by_writable_ancestor();
+        let cwd_is_covered = broadly_grants_cwd(self.policy.writable())
+            || self.cwd_covered_by_writable_ancestor()?;
         for path in &paths {
             let is_dir = path.is_dir();
             if self.selected(path, is_dir, &deny)? {
@@ -384,7 +384,7 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         self.add_external_targets(&classified_writable, &mut writable_targets);
 
         self.apply_literal_specificity(&mut deny_targets, &mut writable_targets);
-        let readable_targets = self.readable_targets(&deny_targets);
+        let readable_targets = self.readable_targets(&deny_targets)?;
         self.prune_redundant_deny_targets(&mut deny_targets);
 
         let protected_targets = self.protected_control_targets(&writable, &deny)?;
@@ -562,12 +562,19 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
 
     /// Returns true when any writable pattern resolves to an absolute path that is an
     /// ancestor of CWD, meaning CWD and its contents are implicitly writable.
-    fn cwd_covered_by_writable_ancestor(&self) -> bool {
-        self.policy.writable().iter().any(|pattern| {
+    fn cwd_covered_by_writable_ancestor(&self) -> Result<bool> {
+        for pattern in self.policy.writable() {
             let expanded = expand_home_pattern(pattern);
             let path = Path::new(&expanded);
-            path.is_absolute() && path.is_dir() && self.cwd.starts_with(path)
-        })
+            if path.is_absolute()
+                && self.cwd.starts_with(path)
+                && concrete_path_state(path)?.is_existing()
+                && path.is_dir()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn apply_literal_specificity(
@@ -628,15 +635,25 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             .map(|path| LiteralRule { path, kind })
     }
 
-    fn readable_targets(&self, deny_targets: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
-        self.policy
-            .deny()
-            .iter()
-            .filter_map(|pattern| pattern.strip_prefix('!'))
-            .filter(|pattern| !is_non_literal_pattern(pattern))
-            .filter_map(|pattern| self.literal_path(pattern))
-            .filter(|path| path.exists() && has_denied_directory_ancestor(path, deny_targets))
-            .collect()
+    fn readable_targets(&self, deny_targets: &BTreeSet<PathBuf>) -> Result<BTreeSet<PathBuf>> {
+        let mut targets = BTreeSet::new();
+        for pattern in self.policy.deny() {
+            let Some(restored) = pattern.strip_prefix('!') else {
+                continue;
+            };
+            if is_non_literal_pattern(restored) {
+                continue;
+            }
+            let Some(path) = self.literal_path(restored) else {
+                continue;
+            };
+            if concrete_path_state(&path)?.is_existing()
+                && has_denied_directory_ancestor(&path, deny_targets)
+            {
+                targets.insert(path);
+            }
+        }
+        Ok(targets)
     }
 
     fn prune_redundant_deny_targets(&self, deny_targets: &mut BTreeSet<PathBuf>) {
@@ -660,7 +677,7 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
     ) -> Result<BTreeSet<PathBuf>> {
         // When a writable ancestor covers CWD, the user trusts the entire tree.
         // Do not protect any control paths — they are explicitly writable.
-        if self.cwd_covered_by_writable_ancestor() {
+        if self.cwd_covered_by_writable_ancestor()? {
             return Ok(BTreeSet::new());
         }
 
@@ -1199,6 +1216,30 @@ mod tests {
 
         assert!(!materialized.writable_targets().contains(&missing_writable));
         assert!(!materialized.readable_targets().contains(&missing_readable));
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn indeterminate_restored_readonly_target_fails_materialization() {
+        use std::os::unix::fs::symlink;
+
+        let cwd = unique_dir("indeterminate-readable");
+        let dangling = cwd.join("dangling-parent");
+        symlink(cwd.join("absent"), &dangling).expect("dangling symlink created");
+        let restored = dangling.join("child");
+        let policy = FilesystemPolicy::new(
+            vec![
+                cwd.to_string_lossy().to_string(),
+                format!("!{}", restored.display()),
+            ],
+            Vec::new(),
+            Default::default(),
+        );
+
+        let result = FilesystemPolicyMaterializer::new(&cwd, &policy).materialize();
+
+        assert!(matches!(result, Err(Error::IndeterminatePath { .. })));
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
     }
 

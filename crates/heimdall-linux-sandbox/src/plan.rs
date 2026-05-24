@@ -172,6 +172,7 @@ impl PreparedBubblewrap<'_> {
             bwrap: self.launcher.path,
             args,
             resources: self.resources,
+            missing_deny_guards: self.materialized.missing_deny_guards().clone(),
         })
     }
 }
@@ -181,6 +182,7 @@ pub struct BubblewrapPlan {
     bwrap: PathBuf,
     args: Vec<OsString>,
     resources: BubblewrapResources,
+    missing_deny_guards: BTreeSet<PathBuf>,
 }
 
 impl BubblewrapPlan {
@@ -191,6 +193,28 @@ impl BubblewrapPlan {
         let mut command = Command::new(&self.bwrap);
         command.args(&self.args);
         command
+    }
+
+    /// Remove sandbox-only mountpoints that bubblewrap created for missing deny guards.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sandbox misconfiguration when an empty mountpoint artifact cannot be removed.
+    pub fn cleanup_missing_deny_guards(&self) -> Result<()> {
+        for guard in &self.missing_deny_guards {
+            match fs::remove_dir(guard) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                Err(error) => {
+                    return Err(Error::sandbox_misconfiguration(format!(
+                        "failed to remove missing deny guard mountpoint {}: {error}",
+                        guard.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -341,11 +365,17 @@ impl<'a> BubblewrapArgBuilder<'a> {
     }
 
     fn build(mut self) -> Result<Vec<OsString>> {
+        self.validate_required_startup_paths()?;
         self.add_namespaces();
         self.add_readonly_base_filesystem()?;
         self.add_policy_mounts();
         self.add_inner_reentry()?;
         Ok(self.args)
+    }
+
+    fn validate_required_startup_paths(&self) -> Result<()> {
+        required_path_exists(&self.launcher.path)?;
+        Ok(())
     }
 
     fn add_namespaces(&mut self) {
@@ -542,8 +572,9 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "failed to resolve current executable: {error}"
             ))
         })?;
+        required_path_exists(&current_exe)?;
         self.ro_bind(&current_exe, Path::new("/heimdall-inner"));
-        for library in Self::runtime_libraries(&current_exe) {
+        for library in Self::runtime_libraries(&current_exe)? {
             self.ro_bind(
                 &library,
                 Path::new("/")
@@ -573,15 +604,20 @@ impl<'a> BubblewrapArgBuilder<'a> {
         Ok(())
     }
 
-    fn runtime_libraries(executable: &Path) -> Vec<PathBuf> {
+    fn runtime_libraries(executable: &Path) -> Result<Vec<PathBuf>> {
         let Some(parent) = executable.parent() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        ["libwebgpu_dawn.so"]
+        let mut libraries = Vec::new();
+        for library in ["libwebgpu_dawn.so"]
             .into_iter()
             .map(|name| parent.join(name))
-            .filter(|path| path.is_file())
-            .collect()
+        {
+            if optional_path_exists(&library)? && library.is_file() {
+                libraries.push(library);
+            }
+        }
+        Ok(libraries)
     }
 
     fn add_host_network_runtime_paths(&mut self) -> Result<()> {
@@ -629,11 +665,11 @@ impl<'a> BubblewrapArgBuilder<'a> {
     fn agent_runtime_sockets() -> Result<BTreeSet<PathBuf>> {
         let mut sockets = BTreeSet::new();
         for key in ["SSH_AUTH_SOCK", "AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
-            if let Some(path) = env_socket_path(env::var_os(key).as_deref()) {
+            if let Some(path) = env_socket_path(env::var_os(key).as_deref())? {
                 sockets.insert(path);
             }
         }
-        if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref()) {
+        if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref())? {
             sockets.insert(path);
         }
         if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
@@ -743,14 +779,26 @@ fn path_aliases(path: &Path) -> BTreeSet<PathBuf> {
     aliases
 }
 
-fn env_socket_path(value: Option<&OsStr>) -> Option<PathBuf> {
-    let path = PathBuf::from(value?);
-    (path.is_absolute() && path.exists()).then_some(path)
+fn env_socket_path(value: Option<&OsStr>) -> Result<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if path.is_absolute() && optional_path_exists(&path)? {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
 }
 
-fn gpg_agent_info_socket(value: Option<&OsStr>) -> Option<PathBuf> {
-    let value = value?.to_string_lossy();
-    let path = value.split(':').next()?;
+fn gpg_agent_info_socket(value: Option<&OsStr>) -> Result<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy();
+    let Some(path) = value.split(':').next() else {
+        return Ok(None);
+    };
     env_socket_path(Some(OsStr::new(path)))
 }
 
@@ -758,6 +806,17 @@ fn optional_path_exists(path: &Path) -> Result<bool> {
     concrete_path_state(path)
         .map(|state| matches!(state, heimdall_sandbox_policy::ConcretePathState::Existing))
         .map_err(Into::into)
+}
+
+fn required_path_exists(path: &Path) -> Result<()> {
+    if optional_path_exists(path)? {
+        Ok(())
+    } else {
+        Err(Error::sandbox_misconfiguration(format!(
+            "required startup path {} does not exist",
+            path.display()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -947,19 +1006,74 @@ mod tests {
         std::fs::write(&socket, "placeholder").expect("socket placeholder written");
 
         assert_eq!(
-            env_socket_path(Some(socket.as_os_str())),
+            env_socket_path(Some(socket.as_os_str())).expect("socket path classifies"),
             Some(socket.clone())
         );
         assert_eq!(
-            gpg_agent_info_socket(Some(OsStr::new(&format!("{}:0:1", socket.display())))),
+            gpg_agent_info_socket(Some(OsStr::new(&format!("{}:0:1", socket.display()))))
+                .expect("gpg socket path classifies"),
             Some(socket)
         );
-        assert_eq!(env_socket_path(Some(OsStr::new("relative.sock"))), None);
         assert_eq!(
-            env_socket_path(Some(root.join("missing.sock").as_os_str())),
+            env_socket_path(Some(OsStr::new("relative.sock"))).expect("relative path ignored"),
+            None
+        );
+        assert_eq!(
+            env_socket_path(Some(root.join("missing.sock").as_os_str()))
+                .expect("missing socket path classifies"),
             None
         );
 
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+    }
+
+    #[test]
+    fn missing_required_bubblewrap_path_fails_planning() {
+        let cwd = std::env::current_dir().expect("cwd exists");
+        let missing_bwrap = std::env::temp_dir().join(format!(
+            "heimdall-missing-bwrap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let request = BubblewrapRequest {
+            cwd: &cwd,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &FilesystemPolicy::default(),
+            proc_mode: ProcMode::Disabled,
+        };
+
+        let result = request.into_plan_with_bwrap(empty_materialized_policy(), missing_bwrap);
+
+        let Err(error) = result else {
+            panic!("missing required bwrap path fails");
+        };
+        assert!(error.to_string().contains("required startup path"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn indeterminate_optional_socket_path_fails_planning() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-indeterminate-socket-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("test dir created");
+        let dangling = root.join("dangling-parent");
+        symlink(root.join("absent"), &dangling).expect("dangling symlink created");
+        let socket = dangling.join("agent.sock");
+
+        let result = env_socket_path(Some(socket.as_os_str()));
+
+        assert!(result.is_err());
         std::fs::remove_dir_all(&root).expect("test dir removed");
     }
 

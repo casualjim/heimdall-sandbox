@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Missing concrete host-backed paths are handled before Bubblewrap mounts
-Linux Bubblewrap planning SHALL skip confirmed-missing ordinary concrete host-backed operations when skipping does not weaken policy, SHALL enforce confirmed-missing denied paths that are creatable through writable directories, and SHALL preserve behavior for existing concrete paths. Paths whose existence is indeterminate MUST NOT be treated as missing.
+Linux Bubblewrap planning SHALL skip confirmed-missing ordinary concrete host-backed operations when skipping does not weaken policy, SHALL enforce confirmed-missing denied paths that are creatable through writable directories, and SHALL preserve behavior for existing concrete paths. Missing-deny guard enforcement MAY use Bubblewrap-created empty mountpoint directories under writable parents as transient runtime artifacts, but those artifacts MUST be removed after sandbox execution when they remain empty. Paths whose existence is indeterminate MUST NOT be treated as missing.
 
 #### Scenario: Missing concrete writable path is skipped
 - **WHEN** `filesystem.writable` contains an absolute or tilde-expanded concrete host path that is confirmed not to exist
@@ -25,7 +25,7 @@ Linux Bubblewrap planning SHALL skip confirmed-missing ordinary concrete host-ba
 - **AND** an effective writable directory target covers that path
 - **THEN** the sandboxed command cannot read host contents from that denied path
 - **AND** the sandboxed command cannot create or write that denied path through the writable directory
-- **AND** the host path is not created
+- **AND** any empty Bubblewrap mountpoint artifact at the denied host path is removed after sandbox execution
 
 #### Scenario: Existing concrete deny path remains masked
 - **WHEN** `filesystem.deny` contains an absolute or tilde-expanded concrete host path that exists
@@ -53,6 +53,12 @@ Linux Bubblewrap planning SHALL skip confirmed-missing ordinary concrete host-ba
 - **THEN** Linux Bubblewrap planning skips that support mount
 - **AND** sandbox startup does not fail because of that missing source path
 - **AND** the host path is not created
+
+#### Scenario: Missing deny guard mountpoint cleanup is bounded
+- **WHEN** Linux Bubblewrap creates an empty mountpoint directory for a missing deny guard under a writable directory
+- **THEN** cleanup targets only the confirmed-missing deny guard path recorded during policy materialization
+- **AND** cleanup removes the path only when it is still an empty directory
+- **AND** cleanup does not remove user file contents or non-empty directories
 
 #### Scenario: Existing optional support mount source remains mapped
 - **WHEN** Linux Bubblewrap planning would emit an optional implementation-internal host-backed support mount from a concrete source path, such as selected platform read roots, selected `/etc` support paths, resolver targets, runtime sockets, agent sockets, home aliases, or optional sidecar libraries

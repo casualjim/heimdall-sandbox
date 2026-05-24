@@ -6,7 +6,7 @@ Shared policies should work across hosts with different local filesystem layouts
 
 ## What Changes
 
-- Native sandbox behavior will tolerate confirmed-missing concrete host paths without creating those paths on the host.
+- Native sandbox behavior will tolerate confirmed-missing concrete host paths without leaving persistent unexpected paths on the host. Linux missing-deny guards under writable parents may use Bubblewrap-created empty mountpoints as transient construction artifacts when those artifacts are cleaned up after the sandbox exits.
 - macOS Seatbelt policy generation will preserve dynamic runtime read access for existing supported platform roots discovered from `PATH`.
 - Existing concrete host paths will continue to be denied, writable, restored readonly, or mapped according to existing behavior.
 - Confirmed-missing denied paths remain denied when they are covered by writable access.
@@ -17,8 +17,8 @@ Shared policies should work across hosts with different local filesystem layouts
 
 - Changing the filesystem policy JSON shape.
 - Changing existing glob, relative, or pattern matching semantics.
-- Creating missing ordinary host paths during sandbox planning.
-- Cleaning up arbitrary user paths after sandbox execution.
+- Creating missing ordinary host-backed writable or restored-readonly paths during sandbox planning.
+- Cleaning up arbitrary user paths after sandbox execution; bounded cleanup is allowed only for empty Linux missing-deny guard mountpoint artifacts that Bubblewrap may create while enforcing deny-over-writable.
 - Weakening protections for existing concrete host paths.
 - Adding Linux-style mount behavior to macOS Seatbelt.
 
@@ -37,4 +37,4 @@ Shared policies should work across hosts with different local filesystem layouts
 
 - Affects native filesystem policy planning for Linux Bubblewrap and macOS Seatbelt.
 - Improves compatibility for shared policies across hosts with different optional paths.
-- Requires regression coverage for missing, existing, and mixed concrete host paths; missing denied paths under writable directories; unchanged relative/pattern behavior; and preserved protected-control and virtual-file behavior.
+- Requires regression coverage for missing, existing, and mixed concrete host paths; missing denied paths under writable directories including transient Bubblewrap mountpoint cleanup; unchanged relative/pattern behavior; and preserved protected-control and virtual-file behavior.

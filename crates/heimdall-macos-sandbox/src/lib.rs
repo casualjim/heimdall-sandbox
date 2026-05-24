@@ -1,6 +1,7 @@
 //! macOS Seatbelt sandbox planning.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -208,12 +209,23 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
     }
 
     fn platform_read_roots() -> Result<Vec<PathBuf>> {
-        let mut roots = BTreeSet::new();
         let Some(path_var) = std::env::var_os("PATH") else {
             return Ok(Vec::new());
         };
-        for path_dir in std::env::split_paths(&path_var).filter(|path| path.is_absolute()) {
-            let Some(read_root) = Self::read_root_for_path_dir(&path_dir) else {
+        Self::platform_read_roots_from_path_var(
+            &path_var,
+            &[Path::new("/opt/homebrew"), Path::new("/usr/local")],
+        )
+    }
+
+    fn platform_read_roots_from_path_var(
+        path_var: &OsStr,
+        supported_prefixes: &[&Path],
+    ) -> Result<Vec<PathBuf>> {
+        let mut roots = BTreeSet::new();
+        for path_dir in std::env::split_paths(path_var).filter(|path| path.is_absolute()) {
+            let Some(read_root) = Self::read_root_for_path_dir(&path_dir, supported_prefixes)
+            else {
                 continue;
             };
             match read_root.try_exists() {
@@ -231,8 +243,9 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         Ok(roots.into_iter().collect())
     }
 
-    fn read_root_for_path_dir(path_dir: &Path) -> Option<PathBuf> {
-        for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
+    fn read_root_for_path_dir(path_dir: &Path, supported_prefixes: &[&Path]) -> Option<PathBuf> {
+        for prefix in supported_prefixes {
+            let prefix = *prefix;
             if path_dir.starts_with(prefix) {
                 return Some(prefix.to_path_buf());
             }
@@ -644,6 +657,65 @@ mod tests {
                     .any(|arg| arg.ends_with(&platform_root.to_string_lossy().to_string()))
             );
         }
+    }
+
+    #[test]
+    fn platform_read_roots_filter_supported_existing_and_missing_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-seatbelt-platform-roots-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let supported = root.join("supported");
+        let unsupported = root.join("unsupported");
+        let missing = root.join("missing");
+        std::fs::create_dir_all(supported.join("bin")).expect("supported bin created");
+        std::fs::create_dir_all(unsupported.join("bin")).expect("unsupported bin created");
+        let path_var = std::env::join_paths([
+            supported.join("bin"),
+            unsupported.join("bin"),
+            missing.join("bin"),
+        ])
+        .expect("PATH value joins");
+
+        let roots = SeatbeltPolicyBuilder::platform_read_roots_from_path_var(
+            &path_var,
+            &[supported.as_path(), missing.as_path()],
+        )
+        .expect("platform roots resolve");
+
+        assert_eq!(roots, vec![supported]);
+        std::fs::remove_dir_all(root).expect("test dir removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_read_roots_reject_indeterminate_supported_roots() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-seatbelt-indeterminate-platform-root-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let blocked = root.join("blocked");
+        let supported = blocked.join("supported");
+        std::fs::create_dir_all(&blocked).expect("blocked dir created");
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
+            .expect("blocked permissions set");
+        let path_var = std::env::join_paths([supported.join("bin")]).expect("PATH value joins");
+
+        let result =
+            SeatbeltPolicyBuilder::platform_read_roots_from_path_var(&path_var, &[&supported]);
+
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700))
+            .expect("blocked permissions restored");
+        std::fs::remove_dir_all(root).expect("test dir removed");
+        assert!(result.is_err());
     }
 
     #[test]
