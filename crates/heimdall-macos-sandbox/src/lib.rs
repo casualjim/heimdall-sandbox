@@ -813,6 +813,45 @@ mod tests {
     }
 
     #[test]
+    fn negated_absolute_deny_is_not_rendered_as_seatbelt_deny() {
+        let root = unique_test_dir("negated-deny");
+        let denied = root.join("aws");
+        std::fs::create_dir_all(&denied).expect("denied dir created");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![
+                denied.to_string_lossy().to_string(),
+                format!("!{}", denied.display()),
+            ],
+            Vec::new(),
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        let policy = policy_arg(plan.args());
+
+        assert!(
+            !plan.args().iter().any(|arg| {
+                arg.starts_with("-DDENY_") && arg.ends_with(denied.to_string_lossy().as_ref())
+            }),
+            "negated deny must not create a Seatbelt deny parameter"
+        );
+        assert!(
+            !policy.contains("(deny file-read* (literal (param \"DENY_"),
+            "negated deny must not emit Seatbelt read-deny rules"
+        );
+        assert!(
+            !policy.contains("(deny file-write* (literal (param \"DENY_"),
+            "negated deny must not emit Seatbelt write-deny rules"
+        );
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+    }
+
+    #[test]
     fn denied_parent_excludes_writable_child() {
         let root = std::env::temp_dir().join(format!(
             "heimdall-seatbelt-specificity-{}",

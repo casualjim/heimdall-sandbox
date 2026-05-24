@@ -376,15 +376,25 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             }
         }
 
-        let classified_deny = self.classified_literal_paths(self.policy.deny())?;
-        let classified_writable = self.classified_literal_paths(self.policy.writable())?;
+        let deny_literal_patterns =
+            self.patterns_with_readable_fragment(self.policy.deny(), DENY_FRAGMENT);
+        let writable_literal_patterns =
+            self.patterns_with_readable_fragment(self.policy.writable(), WRITE_FRAGMENT);
+        let classified_deny = self.classified_selected_literal_paths(&deny_literal_patterns)?;
+        let classified_writable =
+            self.classified_selected_literal_paths(&writable_literal_patterns)?;
 
         // Add external absolute paths directly as targets.
         self.add_external_targets(&classified_deny, &mut deny_targets);
         self.add_external_targets(&classified_writable, &mut writable_targets);
 
-        self.apply_literal_specificity(&mut deny_targets, &mut writable_targets);
-        let readable_targets = self.readable_targets(&deny_targets)?;
+        self.apply_literal_specificity(
+            &mut deny_targets,
+            &mut writable_targets,
+            &deny_literal_patterns,
+            &writable_literal_patterns,
+        );
+        let readable_targets = self.readable_targets(&deny_targets, &deny_literal_patterns)?;
         self.prune_redundant_deny_targets(&mut deny_targets);
 
         let protected_targets = self.protected_control_targets(&writable, &deny)?;
@@ -398,6 +408,15 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             readable_targets,
             missing_deny_guards,
         })
+    }
+
+    fn patterns_with_readable_fragment(&self, patterns: &[String], fragment: &str) -> Vec<String> {
+        let mut result = patterns.to_vec();
+        let fragment_path = self.cwd.join(fragment);
+        if let Ok(contents) = std::fs::read_to_string(fragment_path) {
+            result.extend(contents.lines().map(str::to_string));
+        }
+        result
     }
 
     /// Expand `~` in patterns and split into two groups:
@@ -475,27 +494,44 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         guards
     }
 
-    fn classified_literal_paths(
+    fn classified_selected_literal_paths(
         &self,
         patterns: &[String],
     ) -> Result<Vec<(PathBuf, ConcretePathState)>> {
+        let rules = self.literal_path_rules(patterns);
         let mut paths = Vec::new();
-        for pattern in patterns {
-            let Some(path) = self.literal_absolute_path(pattern) else {
-                continue;
-            };
-            let state = concrete_path_state(&path)?;
-            paths.push((path, state));
+        let mut seen = BTreeSet::new();
+        for rule in rules.iter().filter(|rule| rule.selected) {
+            if seen.insert(rule.path.clone()) && literal_path_is_selected(&rule.path, &rules) {
+                let state = concrete_path_state(&rule.path)?;
+                paths.push((rule.path.clone(), state));
+            }
         }
         Ok(paths)
     }
 
-    fn literal_absolute_path(&self, pattern: &str) -> Option<PathBuf> {
-        if is_non_literal_pattern(pattern) {
+    fn literal_path_rules(&self, patterns: &[String]) -> Vec<LiteralPathRule> {
+        patterns
+            .iter()
+            .enumerate()
+            .filter_map(|(order, pattern)| self.literal_path_rule(pattern, order))
+            .collect()
+    }
+
+    fn literal_path_rule(&self, pattern: &str, order: usize) -> Option<LiteralPathRule> {
+        let (selected, body) = match pattern.strip_prefix('!') {
+            Some(body) => (false, body),
+            None => (true, pattern),
+        };
+        if contains_pattern_metacharacter(body) {
             return None;
         }
-        let path = PathBuf::from(expand_home_pattern(pattern));
-        path.is_absolute().then_some(path)
+        let path = PathBuf::from(shellexpand::tilde(body).into_owned());
+        path.is_absolute().then_some(LiteralPathRule {
+            path,
+            selected,
+            order,
+        })
     }
 
     fn build_matcher(&self, patterns: &[String], fragment: &str) -> Result<Gitignore> {
@@ -581,10 +617,19 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         &self,
         deny_targets: &mut BTreeSet<PathBuf>,
         writable_targets: &mut BTreeSet<PathBuf>,
+        deny_patterns: &[String],
+        writable_patterns: &[String],
     ) {
-        let rules = self.literal_rules();
-        if rules.is_empty() {
+        let deny_rules = self.literal_path_rules(deny_patterns);
+        let writable_rules = self.literal_path_rules(writable_patterns);
+        if deny_rules.is_empty() && writable_rules.is_empty() {
             return;
+        }
+
+        enum LiteralAccess {
+            Deny,
+            Writable,
+            Neither,
         }
 
         let paths = deny_targets
@@ -592,56 +637,52 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             .cloned()
             .collect::<Vec<_>>();
         for path in paths {
-            let Some(rule) = rules
-                .iter()
-                .filter(|rule| rule.matches(&path))
-                .max_by_key(|rule| (rule.specificity(), rule.kind.precedence()))
-            else {
-                continue;
+            let deny = literal_path_decision(&path, &deny_rules);
+            let writable = literal_path_decision(&path, &writable_rules);
+            let access = match (deny, writable) {
+                (Some(deny), Some(writable)) => match (deny.selected, writable.selected) {
+                    (true, true) if writable.specificity() > deny.specificity() => {
+                        LiteralAccess::Writable
+                    }
+                    (true, _) => LiteralAccess::Deny,
+                    (false, true) => LiteralAccess::Writable,
+                    (false, false) => LiteralAccess::Neither,
+                },
+                (Some(deny), None) if deny.selected => LiteralAccess::Deny,
+                (Some(_), None) => LiteralAccess::Neither,
+                (None, Some(writable)) if writable.selected => LiteralAccess::Writable,
+                (None, Some(_)) => LiteralAccess::Neither,
+                (None, None) => continue,
             };
 
-            match rule.kind {
-                LiteralRuleKind::Deny => {
+            match access {
+                LiteralAccess::Deny => {
                     writable_targets.remove(&path);
                     deny_targets.insert(path);
                 }
-                LiteralRuleKind::Writable => {
+                LiteralAccess::Writable => {
                     deny_targets.remove(&path);
                     writable_targets.insert(path);
+                }
+                LiteralAccess::Neither => {
+                    deny_targets.remove(&path);
+                    writable_targets.remove(&path);
                 }
             }
         }
     }
 
-    fn literal_rules(&self) -> Vec<LiteralRule> {
-        self.policy
-            .deny()
-            .iter()
-            .filter_map(|pattern| self.literal_rule(pattern, LiteralRuleKind::Deny))
-            .chain(
-                self.policy
-                    .writable()
-                    .iter()
-                    .filter_map(|pattern| self.literal_rule(pattern, LiteralRuleKind::Writable)),
-            )
-            .collect()
-    }
-
-    fn literal_rule(&self, pattern: &str, kind: LiteralRuleKind) -> Option<LiteralRule> {
-        if is_non_literal_pattern(pattern) {
-            return None;
-        }
-        self.literal_path(pattern)
-            .map(|path| LiteralRule { path, kind })
-    }
-
-    fn readable_targets(&self, deny_targets: &BTreeSet<PathBuf>) -> Result<BTreeSet<PathBuf>> {
+    fn readable_targets(
+        &self,
+        deny_targets: &BTreeSet<PathBuf>,
+        deny_patterns: &[String],
+    ) -> Result<BTreeSet<PathBuf>> {
         let mut targets = BTreeSet::new();
-        for pattern in self.policy.deny() {
+        for pattern in deny_patterns {
             let Some(restored) = pattern.strip_prefix('!') else {
                 continue;
             };
-            if is_non_literal_pattern(restored) {
+            if contains_pattern_metacharacter(restored) {
                 continue;
             }
             let Some(path) = self.literal_path(restored) else {
@@ -763,28 +804,14 @@ fn expand_home_pattern(pattern: &str) -> String {
     format!("!{}", shellexpand::tilde(body))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LiteralRuleKind {
-    Deny,
-    Writable,
-}
-
-impl LiteralRuleKind {
-    const fn precedence(self) -> u8 {
-        match self {
-            Self::Writable => 0,
-            Self::Deny => 1,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LiteralRule {
+struct LiteralPathRule {
     path: PathBuf,
-    kind: LiteralRuleKind,
+    selected: bool,
+    order: usize,
 }
 
-impl LiteralRule {
+impl LiteralPathRule {
     fn matches(&self, path: &Path) -> bool {
         path == self.path || (self.path.is_dir() && path.starts_with(&self.path))
     }
@@ -797,11 +824,24 @@ impl LiteralRule {
     }
 }
 
-fn is_non_literal_pattern(pattern: &str) -> bool {
-    pattern.starts_with('!')
-        || pattern
-            .chars()
-            .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+fn literal_path_decision<'a>(
+    path: &Path,
+    rules: &'a [LiteralPathRule],
+) -> Option<&'a LiteralPathRule> {
+    rules
+        .iter()
+        .filter(|rule| rule.matches(path))
+        .max_by_key(|rule| (rule.specificity(), rule.order))
+}
+
+fn literal_path_is_selected(path: &Path, rules: &[LiteralPathRule]) -> bool {
+    literal_path_decision(path, rules).is_some_and(|rule| rule.selected)
+}
+
+fn contains_pattern_metacharacter(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
 }
 
 fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
@@ -1043,6 +1083,76 @@ mod tests {
         );
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
         std::fs::remove_dir_all(&external).expect("external dir removed");
+    }
+
+    #[test]
+    fn later_absolute_deny_negation_removes_external_deny_target() {
+        let cwd = unique_dir("external-deny-negation");
+        let external = unique_dir("external-deny-negated-target");
+        let policy = FilesystemPolicy::new(
+            vec![
+                external.to_string_lossy().to_string(),
+                format!("!{}", external.display()),
+            ],
+            Vec::new(),
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(!materialized.deny_targets().contains(&external));
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+        std::fs::remove_dir_all(external).expect("external dir removed");
+    }
+
+    #[test]
+    fn later_absolute_deny_negation_suppresses_missing_guard() {
+        let cwd = unique_dir("missing-deny-negation");
+        let writable = cwd.join("writable");
+        std::fs::create_dir(&writable).expect("writable dir created");
+        let missing = writable.join("missing-deny");
+        let policy = FilesystemPolicy::new(
+            vec![
+                missing.to_string_lossy().to_string(),
+                format!("!{}", missing.display()),
+            ],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(!materialized.deny_targets().contains(&missing));
+        assert!(!materialized.missing_deny_guards().contains(&missing));
+        assert!(!missing.exists());
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[test]
+    fn later_absolute_deny_negation_does_not_override_writable_target() {
+        let cwd = unique_dir("deny-negation-writable");
+        let external = unique_dir("deny-negation-writable-target");
+        let policy = FilesystemPolicy::new(
+            vec![
+                external.to_string_lossy().to_string(),
+                format!("!{}", external.display()),
+            ],
+            vec![external.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(!materialized.deny_targets().contains(&external));
+        assert!(materialized.writable_targets().contains(&external));
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+        std::fs::remove_dir_all(external).expect("external dir removed");
     }
 
     #[test]
