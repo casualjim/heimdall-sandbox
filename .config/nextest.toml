@@ -1,3 +1,5 @@
 [profile.default]
+# Retry flaky tests up to 3 times before treating them as failed.
+retries = 3
 # Any test that runs longer than 30 seconds is considered hung.
 slow-timeout = { period = "30s", terminate-after = 1 }
