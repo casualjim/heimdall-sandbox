@@ -1,8 +1,25 @@
+## [0.1.40] - 2026-05-24
+
+### 🐛 Bug Fixes
+
+- Tolerate missing host directories
+- Tolerate missing host directories
+- Tolerate missing host policy paths
+- Tolerate missing host policy paths
+
+### 🧪 Testing
+
+- *(sandbox)* Cover missing host paths
 ## [0.1.39] - 2026-05-19
 
 ### 🐛 Bug Fixes
 
 - Stop patching deleted Homebrew binary
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.39 [ci skip]
+- Release version 0.1.39
 ## [0.1.38] - 2026-05-18
 
 ### 🐛 Bug Fixes
