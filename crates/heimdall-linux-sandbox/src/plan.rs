@@ -8,7 +8,7 @@ use std::process::Command;
 use crate::launcher::BubblewrapLauncher;
 use crate::policy::{
     FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy, NetworkMode,
-    ProcMode,
+    ProcMode, concrete_path_state,
 };
 use crate::virtual_files::{BubblewrapResources, VirtualDataFile};
 use crate::{Error, Result};
@@ -172,6 +172,7 @@ impl PreparedBubblewrap<'_> {
             bwrap: self.launcher.path,
             args,
             resources: self.resources,
+            missing_deny_guards: self.materialized.missing_deny_guards().clone(),
         })
     }
 }
@@ -181,6 +182,7 @@ pub struct BubblewrapPlan {
     bwrap: PathBuf,
     args: Vec<OsString>,
     resources: BubblewrapResources,
+    missing_deny_guards: BTreeSet<PathBuf>,
 }
 
 impl BubblewrapPlan {
@@ -191,6 +193,28 @@ impl BubblewrapPlan {
         let mut command = Command::new(&self.bwrap);
         command.args(&self.args);
         command
+    }
+
+    /// Remove sandbox-only mountpoints that bubblewrap created for missing deny guards.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sandbox misconfiguration when an empty mountpoint artifact cannot be removed.
+    pub fn cleanup_missing_deny_guards(&self) -> Result<()> {
+        for guard in &self.missing_deny_guards {
+            match fs::remove_dir(guard) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                Err(error) => {
+                    return Err(Error::sandbox_misconfiguration(format!(
+                        "failed to remove missing deny guard mountpoint {}: {error}",
+                        guard.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -257,6 +281,12 @@ impl<'a> PolicyMount<'a> {
         ) && self.source.is_dir()
     }
 
+    fn is_missing_deny_guard_for(&self, parent: &Self) -> bool {
+        self.kind == PolicyMountKind::MissingDenyGuard
+            && self.destination != parent.destination
+            && self.destination.starts_with(parent.destination)
+    }
+
     fn must_stage_mountpoint_for(&self, child: &Self) -> bool {
         self.is_directory_mask()
             && child.destination != self.destination
@@ -266,6 +296,7 @@ impl<'a> PolicyMount<'a> {
     fn mountpoint_kind(&self) -> MountpointKind {
         match self.kind {
             PolicyMountKind::VirtualFile { .. } => MountpointKind::File,
+            PolicyMountKind::MissingDenyGuard => MountpointKind::Directory,
             PolicyMountKind::Writable
             | PolicyMountKind::Readable
             | PolicyMountKind::Deny
@@ -293,6 +324,7 @@ enum PolicyMountKind {
     VirtualFile { fd: i32 },
     Deny,
     Protected,
+    MissingDenyGuard,
 }
 
 impl PolicyMountKind {
@@ -303,6 +335,7 @@ impl PolicyMountKind {
             Self::VirtualFile { .. } => 2,
             Self::Deny => 3,
             Self::Protected => 4,
+            Self::MissingDenyGuard => 5,
         }
     }
 }
@@ -332,11 +365,17 @@ impl<'a> BubblewrapArgBuilder<'a> {
     }
 
     fn build(mut self) -> Result<Vec<OsString>> {
+        self.validate_required_startup_paths()?;
         self.add_namespaces();
-        self.add_readonly_base_filesystem();
+        self.add_readonly_base_filesystem()?;
         self.add_policy_mounts();
         self.add_inner_reentry()?;
         Ok(self.args)
+    }
+
+    fn validate_required_startup_paths(&self) -> Result<()> {
+        required_path_exists(&self.launcher.path)?;
+        Ok(())
     }
 
     fn add_namespaces(&mut self) {
@@ -355,23 +394,26 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.tmpfs_with_perms(Path::new("/tmp"), "1777");
     }
 
-    fn add_readonly_base_filesystem(&mut self) {
+    fn add_readonly_base_filesystem(&mut self) -> Result<()> {
+        // Optional support mounts are skipped only when confirmed missing; indeterminate
+        // states remain planning errors so policy never weakens on ambiguous host state.
         for root in Self::platform_read_roots() {
-            if root.exists() {
+            if optional_path_exists(&root)? {
                 self.ro_bind(&root, &root);
             }
         }
         if self.request.network_mode == NetworkMode::Host {
-            self.add_host_network_runtime_paths();
+            self.add_host_network_runtime_paths()?;
         }
-        self.add_agent_runtime_sockets();
+        self.add_agent_runtime_sockets()?;
         if let Some(home) = dirs_home() {
             for alias in path_aliases(&home) {
-                if alias.is_dir() {
+                if optional_path_exists(&alias)? && alias.is_dir() {
                     self.ro_bind(&alias, &alias);
                 }
             }
         }
+        Ok(())
     }
 
     fn add_policy_mounts(&mut self) {
@@ -406,6 +448,16 @@ impl<'a> BubblewrapArgBuilder<'a> {
             };
             PolicyMount::deny(source, path)
         }));
+        mounts.extend(
+            self.materialized
+                .missing_deny_guards()
+                .iter()
+                .map(|path| PolicyMount {
+                    source: empty_dir.as_path(),
+                    destination: path.as_path(),
+                    kind: PolicyMountKind::MissingDenyGuard,
+                }),
+        );
         mounts.extend(self.materialized.protected_targets().iter().map(|path| {
             let source = if path.exists() && !path.is_dir() {
                 empty_file.as_path()
@@ -439,6 +491,29 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 continue;
             }
 
+            if mount.kind == PolicyMountKind::Writable
+                && mounts
+                    .iter()
+                    .any(|candidate| candidate.is_missing_deny_guard_for(&mount))
+            {
+                // Missing deny guards under a writable parent need a sandbox-only
+                // mountpoint before the host writable tree is visible. Stage the
+                // writable destination as tmpfs, create/mount the guarded child
+                // there, then bind the writable parent and later layer the final
+                // guard in sorted order. This preserves deny-over-writable without
+                // creating the missing path on the host.
+                self.tmpfs(mount.destination);
+                for candidate in mounts
+                    .iter()
+                    .filter(|candidate| candidate.is_missing_deny_guard_for(&mount))
+                {
+                    self.add_staged_mountpoint(mount.destination, candidate, &empty_file);
+                    self.ro_bind(candidate.source, candidate.destination);
+                }
+                self.add_policy_mount(mount);
+                continue;
+            }
+
             self.add_policy_mount(mount);
         }
     }
@@ -452,7 +527,9 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 self.args.push(fd.to_string().into());
                 self.args.push(mount.destination.as_os_str().to_os_string());
             }
-            PolicyMountKind::Deny | PolicyMountKind::Protected => {
+            PolicyMountKind::Deny
+            | PolicyMountKind::Protected
+            | PolicyMountKind::MissingDenyGuard => {
                 self.ro_bind(mount.source, mount.destination);
             }
         }
@@ -495,8 +572,9 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "failed to resolve current executable: {error}"
             ))
         })?;
+        required_path_exists(&current_exe)?;
         self.ro_bind(&current_exe, Path::new("/heimdall-inner"));
-        for library in Self::runtime_libraries(&current_exe) {
+        for library in Self::runtime_libraries(&current_exe)? {
             self.ro_bind(
                 &library,
                 Path::new("/")
@@ -526,42 +604,52 @@ impl<'a> BubblewrapArgBuilder<'a> {
         Ok(())
     }
 
-    fn runtime_libraries(executable: &Path) -> Vec<PathBuf> {
+    fn runtime_libraries(executable: &Path) -> Result<Vec<PathBuf>> {
         let Some(parent) = executable.parent() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        ["libwebgpu_dawn.so"]
+        let mut libraries = Vec::new();
+        for library in ["libwebgpu_dawn.so"]
             .into_iter()
             .map(|name| parent.join(name))
-            .filter(|path| path.is_file())
-            .collect()
-    }
-
-    fn add_host_network_runtime_paths(&mut self) {
-        self.add_resolver_symlink_target();
-        self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"));
-    }
-
-    fn add_agent_runtime_sockets(&mut self) {
-        for socket in Self::agent_runtime_sockets() {
-            self.add_runtime_socket(&socket);
+        {
+            if optional_path_exists(&library)? && library.is_file() {
+                libraries.push(library);
+            }
         }
+        Ok(libraries)
     }
 
-    fn add_resolver_symlink_target(&mut self) {
+    fn add_host_network_runtime_paths(&mut self) -> Result<()> {
+        self.add_resolver_symlink_target()?;
+        self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"))
+    }
+
+    fn add_agent_runtime_sockets(&mut self) -> Result<()> {
+        for socket in Self::agent_runtime_sockets()? {
+            self.add_runtime_socket(&socket)?;
+        }
+        Ok(())
+    }
+
+    fn add_resolver_symlink_target(&mut self) -> Result<()> {
         let Some(target) = Self::resolver_symlink_target(Path::new("/etc/resolv.conf")) else {
-            return;
+            return Ok(());
         };
-        self.add_destination_parent_dirs(&target);
-        self.ro_bind(&target, &target);
+        if optional_path_exists(&target)? {
+            self.add_destination_parent_dirs(&target);
+            self.ro_bind(&target, &target);
+        }
+        Ok(())
     }
 
-    fn add_runtime_socket(&mut self, socket: &Path) {
-        if !socket.exists() {
-            return;
+    fn add_runtime_socket(&mut self, socket: &Path) -> Result<()> {
+        if !optional_path_exists(socket)? {
+            return Ok(());
         }
         self.add_destination_parent_dirs(socket);
         self.bind(socket, socket);
+        Ok(())
     }
 
     fn resolver_symlink_target(resolv_conf: &Path) -> Option<PathBuf> {
@@ -574,14 +662,14 @@ impl<'a> BubblewrapArgBuilder<'a> {
         absolute.canonicalize().ok()
     }
 
-    fn agent_runtime_sockets() -> BTreeSet<PathBuf> {
+    fn agent_runtime_sockets() -> Result<BTreeSet<PathBuf>> {
         let mut sockets = BTreeSet::new();
         for key in ["SSH_AUTH_SOCK", "AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
-            if let Some(path) = env_socket_path(env::var_os(key).as_deref()) {
+            if let Some(path) = env_socket_path(env::var_os(key).as_deref())? {
                 sockets.insert(path);
             }
         }
-        if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref()) {
+        if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref())? {
             sockets.insert(path);
         }
         if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
@@ -592,12 +680,12 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "S.gpg-agent.browser",
             ] {
                 let path = runtime_dir.join("gnupg").join(name);
-                if path.exists() {
+                if optional_path_exists(&path)? {
                     sockets.insert(path);
                 }
             }
         }
-        sockets
+        Ok(sockets)
     }
 
     fn add_destination_parent_dirs(&mut self, destination: &Path) {
@@ -691,15 +779,44 @@ fn path_aliases(path: &Path) -> BTreeSet<PathBuf> {
     aliases
 }
 
-fn env_socket_path(value: Option<&OsStr>) -> Option<PathBuf> {
-    let path = PathBuf::from(value?);
-    (path.is_absolute() && path.exists()).then_some(path)
+fn env_socket_path(value: Option<&OsStr>) -> Result<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if path.is_absolute() && optional_path_exists(&path)? {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
 }
 
-fn gpg_agent_info_socket(value: Option<&OsStr>) -> Option<PathBuf> {
-    let value = value?.to_string_lossy();
-    let path = value.split(':').next()?;
+fn gpg_agent_info_socket(value: Option<&OsStr>) -> Result<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy();
+    let Some(path) = value.split(':').next() else {
+        return Ok(None);
+    };
     env_socket_path(Some(OsStr::new(path)))
+}
+
+fn optional_path_exists(path: &Path) -> Result<bool> {
+    concrete_path_state(path)
+        .map(|state| matches!(state, heimdall_sandbox_policy::ConcretePathState::Existing))
+        .map_err(Into::into)
+}
+
+fn required_path_exists(path: &Path) -> Result<()> {
+    if optional_path_exists(path)? {
+        Ok(())
+    } else {
+        Err(Error::sandbox_misconfiguration(format!(
+            "required startup path {} does not exist",
+            path.display()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -716,6 +833,10 @@ mod tests {
         MaterializedFilesystemPolicy::empty()
     }
 
+    fn existing_bwrap_path() -> PathBuf {
+        std::env::current_exe().expect("test executable path exists")
+    }
+
     #[test]
     fn network_none_adds_unshare_net() {
         let cwd = std::env::current_dir().expect("cwd exists");
@@ -728,7 +849,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(plan.args.iter().any(|arg| arg == "--unshare-net"));
@@ -746,7 +867,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(!plan.args.iter().any(|arg| arg == "--unshare-net"));
@@ -764,7 +885,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(plan.args.iter().any(|arg| arg == "--unshare-user"));
@@ -785,7 +906,7 @@ mod tests {
             .into_plan_with_launcher(
                 empty_materialized_policy(),
                 BubblewrapLauncher {
-                    path: PathBuf::from("/usr/bin/bwrap"),
+                    path: existing_bwrap_path(),
                     supports_argv0: true,
                 },
             )
@@ -817,7 +938,7 @@ mod tests {
             .into_plan_with_launcher(
                 empty_materialized_policy(),
                 BubblewrapLauncher {
-                    path: PathBuf::from("/usr/bin/bwrap"),
+                    path: existing_bwrap_path(),
                     supports_argv0: false,
                 },
             )
@@ -869,7 +990,7 @@ mod tests {
             proc_mode: ProcMode::Disabled,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(!plan.args.iter().any(|arg| arg == "--proc"));
@@ -889,19 +1010,74 @@ mod tests {
         std::fs::write(&socket, "placeholder").expect("socket placeholder written");
 
         assert_eq!(
-            env_socket_path(Some(socket.as_os_str())),
+            env_socket_path(Some(socket.as_os_str())).expect("socket path classifies"),
             Some(socket.clone())
         );
         assert_eq!(
-            gpg_agent_info_socket(Some(OsStr::new(&format!("{}:0:1", socket.display())))),
+            gpg_agent_info_socket(Some(OsStr::new(&format!("{}:0:1", socket.display()))))
+                .expect("gpg socket path classifies"),
             Some(socket)
         );
-        assert_eq!(env_socket_path(Some(OsStr::new("relative.sock"))), None);
         assert_eq!(
-            env_socket_path(Some(root.join("missing.sock").as_os_str())),
+            env_socket_path(Some(OsStr::new("relative.sock"))).expect("relative path ignored"),
+            None
+        );
+        assert_eq!(
+            env_socket_path(Some(root.join("missing.sock").as_os_str()))
+                .expect("missing socket path classifies"),
             None
         );
 
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+    }
+
+    #[test]
+    fn missing_required_bubblewrap_path_fails_planning() {
+        let cwd = std::env::current_dir().expect("cwd exists");
+        let missing_bwrap = std::env::temp_dir().join(format!(
+            "heimdall-missing-bwrap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let request = BubblewrapRequest {
+            cwd: &cwd,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &FilesystemPolicy::default(),
+            proc_mode: ProcMode::Disabled,
+        };
+
+        let result = request.into_plan_with_bwrap(empty_materialized_policy(), missing_bwrap);
+
+        let Err(error) = result else {
+            panic!("missing required bwrap path fails");
+        };
+        assert!(error.to_string().contains("required startup path"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn indeterminate_optional_socket_path_fails_planning() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-indeterminate-socket-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("test dir created");
+        let dangling = root.join("dangling-parent");
+        symlink(root.join("absent"), &dangling).expect("dangling symlink created");
+        let socket = dangling.join("agent.sock");
+
+        let result = env_socket_path(Some(socket.as_os_str()));
+
+        assert!(result.is_err());
         std::fs::remove_dir_all(&root).expect("test dir removed");
     }
 
@@ -945,7 +1121,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
         let args = plan
             .args
@@ -1028,7 +1204,7 @@ mod tests {
                     BTreeSet::from([cwd.clone()]),
                     BTreeSet::new(),
                 ),
-                PathBuf::from("/usr/bin/bwrap"),
+                existing_bwrap_path(),
             )
             .expect("plan builds");
         let args = plan
@@ -1085,7 +1261,7 @@ mod tests {
                     BTreeSet::from([writable.clone()]),
                     BTreeSet::new(),
                 ),
-                PathBuf::from("/usr/bin/bwrap"),
+                existing_bwrap_path(),
             )
             .expect("plan builds");
         std::fs::remove_dir_all(&root).expect("test dirs removed");
@@ -1114,5 +1290,125 @@ mod tests {
         assert!(tmpfs_parent < child_mountpoint);
         assert!(child_mountpoint < seal_parent);
         assert!(seal_parent < bind_child);
+    }
+    #[test]
+    fn missing_policy_paths_are_skipped_or_guarded_in_bubblewrap_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-missing-policy-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let writable = root.join("writable");
+        std::fs::create_dir_all(&writable).expect("test dirs created");
+        let missing_writable = root.join("missing-write");
+        let missing_deny_outside = root.join("missing-deny-outside");
+        let missing_deny_guard = writable.join("missing-deny-guard");
+        let policy = FilesystemPolicy::new(
+            vec![
+                missing_deny_outside.to_string_lossy().to_string(),
+                missing_deny_guard.to_string_lossy().to_string(),
+            ],
+            vec![
+                writable.to_string_lossy().to_string(),
+                missing_writable.to_string_lossy().to_string(),
+            ],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &policy)
+            .materialize()
+            .expect("policy materializes");
+        let request = BubblewrapRequest {
+            cwd: &root,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &policy,
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(materialized, existing_bwrap_path())
+            .expect("plan builds");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(!args.windows(3).any(|w| {
+            (w[0] == "--bind" || w[0] == "--ro-bind") && w[2] == missing_writable.to_string_lossy()
+        }));
+        assert!(!args.windows(3).any(|w| {
+            (w[0] == "--bind" || w[0] == "--ro-bind")
+                && w[2] == missing_deny_outside.to_string_lossy()
+        }));
+        let staged_guard = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[2] == missing_deny_guard.to_string_lossy())
+            .expect("missing deny guard is staged");
+        let writable_bind = args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[2] == writable.to_string_lossy())
+            .expect("writable bind exists");
+        assert!(staged_guard < writable_bind);
+        assert!(
+            args.windows(3)
+                .skip(writable_bind + 1)
+                .any(|w| { w[0] == "--ro-bind" && w[2] == missing_deny_guard.to_string_lossy() })
+        );
+        assert!(!missing_writable.exists());
+        assert!(!missing_deny_outside.exists());
+        assert!(!missing_deny_guard.exists());
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+    }
+
+    #[test]
+    fn existing_policy_paths_keep_bubblewrap_mounts() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-existing-policy-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let writable = root.join("writable");
+        let denied = root.join("denied");
+        std::fs::create_dir_all(&writable).expect("writable dir created");
+        std::fs::write(&denied, "secret").expect("denied file written");
+        let policy = FilesystemPolicy::new(
+            vec![denied.to_string_lossy().to_string()],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &policy)
+            .materialize()
+            .expect("policy materializes");
+        let request = BubblewrapRequest {
+            cwd: &root,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &policy,
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(materialized, existing_bwrap_path())
+            .expect("plan builds");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.windows(3)
+                .any(|w| { w[0] == "--bind" && w[2] == writable.to_string_lossy() })
+        );
+        assert!(
+            args.windows(3)
+                .any(|w| { w[0] == "--ro-bind" && w[2] == denied.to_string_lossy() })
+        );
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
     }
 }

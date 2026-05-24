@@ -1,6 +1,7 @@
 //! macOS Seatbelt sandbox planning.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -124,6 +125,7 @@ struct DecomposedTargets {
     writable_targets: BTreeSet<PathBuf>,
     protected_targets: BTreeSet<PathBuf>,
     readable_targets: BTreeSet<PathBuf>,
+    missing_deny_guards: BTreeSet<PathBuf>,
 }
 
 struct SeatbeltPolicyBuilder<'a> {
@@ -137,12 +139,14 @@ struct SeatbeltPolicyBuilder<'a> {
 impl<'a> SeatbeltPolicyBuilder<'a> {
     fn new(request: &'a SeatbeltRequest<'a>, materialized: MaterializedFilesystemPolicy) -> Self {
         let readable_targets = materialized.readable_targets().clone();
+        let missing_deny_guards = materialized.missing_deny_guards().clone();
         let (deny_targets, writable_targets, protected_targets) = materialized.into_parts();
         let targets = DecomposedTargets {
             deny_targets,
             writable_targets,
             protected_targets,
             readable_targets,
+            missing_deny_guards,
         };
         let home_dir = dirs_home().and_then(|h| {
             let h = h.canonicalize().ok()?;
@@ -163,10 +167,10 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         text.push('\n');
         text.push_str(PLATFORM_DEFAULTS);
         text.push('\n');
-        text.push_str(&self.read_policy());
         let heimdall_wildcard = self.heimdall_wildcard_write_deny_policy();
         let write_exclusions = self.write_exclusions();
         let deny_exclusions = self.deny_exclusions();
+        text.push_str(&self.read_policy()?);
         text.push_str(&self.write_policy(&write_exclusions));
         text.push_str(&self.platform_writable_policy()?);
         text.push_str(&self.deny_policy(&deny_exclusions));
@@ -179,23 +183,74 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         })
     }
 
-    fn read_policy(&mut self) -> String {
+    fn read_policy(&mut self) -> Result<String> {
         let mut policy = String::from("; allow read-only file operations\n");
-        for root in path_aliases(self.request.cwd) {
-            let readable_root = self.path_param("READABLE_ROOT", &root);
+        self.push_readable_root_policy(&mut policy, "READABLE_ROOT", self.request.cwd);
+        for root in Self::platform_read_roots()? {
+            self.push_readable_root_policy(&mut policy, "PLATFORM_READ_ROOT", &root);
+        }
+        let readable_targets = std::mem::take(&mut self.targets.readable_targets);
+        for readable in readable_targets {
+            self.push_readable_root_policy(&mut policy, "READABLE_TARGET", &readable);
+        }
+        if let Some(home) = self.home_dir.clone() {
+            self.push_readable_root_policy(&mut policy, "HOME_DIR", &home);
+        }
+        Ok(policy)
+    }
+
+    fn push_readable_root_policy(&mut self, policy: &mut String, prefix: &str, root: &Path) {
+        for alias in path_aliases(root) {
+            let readable_root = self.path_param(prefix, &alias);
             policy.push_str(&format!(
                 "(allow file-read* (subpath (param \"{readable_root}\")))\n"
             ));
         }
-        if let Some(home) = &self.home_dir {
-            for alias in path_aliases(home) {
-                let home_param = self.path_param("HOME_DIR", &alias);
-                policy.push_str(&format!(
-                    "(allow file-read* (subpath (param \"{home_param}\")))\n"
-                ));
+    }
+
+    fn platform_read_roots() -> Result<Vec<PathBuf>> {
+        let Some(path_var) = std::env::var_os("PATH") else {
+            return Ok(Vec::new());
+        };
+        Self::platform_read_roots_from_path_var(
+            &path_var,
+            &[Path::new("/opt/homebrew"), Path::new("/usr/local")],
+        )
+    }
+
+    fn platform_read_roots_from_path_var(
+        path_var: &OsStr,
+        supported_prefixes: &[&Path],
+    ) -> Result<Vec<PathBuf>> {
+        let mut roots = BTreeSet::new();
+        for path_dir in std::env::split_paths(path_var).filter(|path| path.is_absolute()) {
+            let Some(read_root) = Self::read_root_for_path_dir(&path_dir, supported_prefixes)
+            else {
+                continue;
+            };
+            match read_root.try_exists() {
+                Ok(true) => {
+                    roots.insert(read_root);
+                }
+                Ok(false) => {}
+                Err(source) => {
+                    return Err(Error::PlatformDirectory {
+                        message: format!("failed to inspect {}: {source}", read_root.display()),
+                    });
+                }
             }
         }
-        policy
+        Ok(roots.into_iter().collect())
+    }
+
+    fn read_root_for_path_dir(path_dir: &Path, supported_prefixes: &[&Path]) -> Option<PathBuf> {
+        for prefix in supported_prefixes {
+            let prefix = *prefix;
+            if path_dir.starts_with(prefix) {
+                return Some(prefix.to_path_buf());
+            }
+        }
+        None
     }
 
     fn write_policy(&mut self, exclusions: &BTreeSet<PathBuf>) -> String {
@@ -234,6 +289,9 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         for denied in &self.targets.deny_targets {
             exclusions.extend(path_aliases(denied));
         }
+        for guard in &self.targets.missing_deny_guards {
+            exclusions.extend(path_aliases(guard));
+        }
         for protected in &self.targets.protected_targets {
             exclusions.extend(path_aliases(protected));
         }
@@ -247,37 +305,11 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         let mut rules = String::new();
         let deny_targets = std::mem::take(&mut self.targets.deny_targets);
         for denied in deny_targets {
-            for alias in path_aliases(&denied) {
-                let param = self.path_param("DENY", &alias);
-                rules.push_str(&format!(
-                    "(deny file-read* (literal (param \"{param}\")))\n"
-                ));
-                rules.push_str(&format!(
-                    "(deny file-write* (literal (param \"{param}\")))\n"
-                ));
-                if alias.is_dir() {
-                    let subpath_match = format!("(subpath (param \"{param}\"))");
-                    let mut require_parts = vec![subpath_match];
-                    for excluded in exclusions
-                        .iter()
-                        .filter(|excluded| path_has_prefix(excluded, &alias) && *excluded != &alias)
-                    {
-                        let excluded_param = self.path_param("DENY_EXCLUDED", excluded);
-                        require_parts.push(format!(
-                            "(require-not (literal (param \"{excluded_param}\")))"
-                        ));
-                        require_parts.push(format!(
-                            "(require-not (subpath (param \"{excluded_param}\")))"
-                        ));
-                    }
-                    rules.push_str("(deny file-read*\n  (require-all ");
-                    rules.push_str(&require_parts.join(" "));
-                    rules.push_str("))\n");
-                    rules.push_str("(deny file-write*\n  (require-all ");
-                    rules.push_str(&require_parts.join(" "));
-                    rules.push_str("))\n");
-                }
-            }
+            self.push_deny_policy(&mut rules, &denied, exclusions, false);
+        }
+        let missing_deny_guards = std::mem::take(&mut self.targets.missing_deny_guards);
+        for guard in missing_deny_guards {
+            self.push_deny_policy(&mut rules, &guard, exclusions, true);
         }
         let protected_targets = std::mem::take(&mut self.targets.protected_targets);
         for protected in protected_targets {
@@ -292,6 +324,46 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
             }
         }
         rules
+    }
+
+    fn push_deny_policy(
+        &mut self,
+        rules: &mut String,
+        denied: &Path,
+        exclusions: &BTreeSet<PathBuf>,
+        force_subpath_deny: bool,
+    ) {
+        for alias in path_aliases(denied) {
+            let param = self.path_param("DENY", &alias);
+            rules.push_str(&format!(
+                "(deny file-read* (literal (param \"{param}\")))\n"
+            ));
+            rules.push_str(&format!(
+                "(deny file-write* (literal (param \"{param}\")))\n"
+            ));
+            if alias.is_dir() || force_subpath_deny {
+                let subpath_match = format!("(subpath (param \"{param}\"))");
+                let mut require_parts = vec![subpath_match];
+                for excluded in exclusions
+                    .iter()
+                    .filter(|excluded| path_has_prefix(excluded, &alias) && *excluded != &alias)
+                {
+                    let excluded_param = self.path_param("DENY_EXCLUDED", excluded);
+                    require_parts.push(format!(
+                        "(require-not (literal (param \"{excluded_param}\")))"
+                    ));
+                    require_parts.push(format!(
+                        "(require-not (subpath (param \"{excluded_param}\")))"
+                    ));
+                }
+                rules.push_str("(deny file-read*\n  (require-all ");
+                rules.push_str(&require_parts.join(" "));
+                rules.push_str("))\n");
+                rules.push_str("(deny file-write*\n  (require-all ");
+                rules.push_str(&require_parts.join(" "));
+                rules.push_str("))\n");
+            }
+        }
     }
 
     fn deny_exclusions(&self) -> BTreeSet<PathBuf> {
@@ -533,6 +605,30 @@ mod tests {
         &args[index + 1]
     }
 
+    fn param_key_for_path<'a>(args: &'a [String], path: &Path) -> &'a str {
+        let suffix = path.to_string_lossy();
+        let param = args
+            .iter()
+            .find(|arg| arg.starts_with("-DDENY_") && arg.ends_with(suffix.as_ref()))
+            .expect("deny param for path exists");
+        param
+            .strip_prefix("-D")
+            .and_then(|value| value.split_once('=').map(|(key, _)| key))
+            .expect("param has key")
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-seatbelt-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("test dir created");
+        root
+    }
+
     #[test]
     fn plan_uses_fixed_seatbelt_executable() {
         let cwd = std::env::current_dir().expect("cwd exists");
@@ -564,6 +660,74 @@ mod tests {
         assert!(policy.contains("(sysctl-name \"machdep.cpu.brand_string\")"));
         assert!(policy.contains("(subpath \"/usr/bin\")"));
         assert!(policy.contains("(subpath \"/System\")"));
+        for platform_root in
+            SeatbeltPolicyBuilder::platform_read_roots().expect("platform roots inspect")
+        {
+            assert!(
+                plan.args()
+                    .iter()
+                    .any(|arg| arg.ends_with(&platform_root.to_string_lossy().to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn platform_read_roots_filter_supported_existing_and_missing_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-seatbelt-platform-roots-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let supported = root.join("supported");
+        let unsupported = root.join("unsupported");
+        let missing = root.join("missing");
+        std::fs::create_dir_all(supported.join("bin")).expect("supported bin created");
+        std::fs::create_dir_all(unsupported.join("bin")).expect("unsupported bin created");
+        let path_var = std::env::join_paths([
+            supported.join("bin"),
+            unsupported.join("bin"),
+            missing.join("bin"),
+        ])
+        .expect("PATH value joins");
+
+        let roots = SeatbeltPolicyBuilder::platform_read_roots_from_path_var(
+            &path_var,
+            &[supported.as_path(), missing.as_path()],
+        )
+        .expect("platform roots resolve");
+
+        assert_eq!(roots, vec![supported]);
+        std::fs::remove_dir_all(root).expect("test dir removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_read_roots_reject_indeterminate_supported_roots() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-seatbelt-indeterminate-platform-root-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let blocked = root.join("blocked");
+        let supported = blocked.join("supported");
+        std::fs::create_dir_all(&blocked).expect("blocked dir created");
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
+            .expect("blocked permissions set");
+        let path_var = std::env::join_paths([supported.join("bin")]).expect("PATH value joins");
+
+        let result =
+            SeatbeltPolicyBuilder::platform_read_roots_from_path_var(&path_var, &[&supported]);
+
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700))
+            .expect("blocked permissions restored");
+        std::fs::remove_dir_all(root).expect("test dir removed");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -683,6 +847,143 @@ mod tests {
                 .iter()
                 .any(|arg| arg.ends_with(&writable.to_string_lossy().to_string()))
         );
+    }
+
+    #[test]
+    fn missing_writable_and_outside_deny_paths_are_not_rendered() {
+        let root = unique_test_dir("missing-skipped");
+        let missing_writable = root.join("missing-write");
+        let outside_deny = root.join("outside-deny");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![outside_deny.to_string_lossy().to_string()],
+            vec![missing_writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+
+        assert!(
+            !plan
+                .args()
+                .iter()
+                .any(|arg| arg.contains(missing_writable.to_string_lossy().as_ref()))
+        );
+        assert!(
+            !plan
+                .args()
+                .iter()
+                .any(|arg| arg.contains(outside_deny.to_string_lossy().as_ref()))
+        );
+        assert!(!missing_writable.exists());
+        assert!(!outside_deny.exists());
+    }
+
+    #[test]
+    fn tilde_existing_writable_and_missing_deny_guard_are_rendered() {
+        let root = unique_test_dir("tilde-policy");
+        let home = heimdall_sandbox_policy::home_dir().expect("home dir exists");
+        let missing = home.join(format!(
+            ".heimdall-seatbelt-missing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        assert!(!missing.exists());
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![format!(
+                "~/{}",
+                missing
+                    .file_name()
+                    .expect("missing file name")
+                    .to_string_lossy()
+            )],
+            vec!["~".to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+        let policy = policy_arg(plan.args());
+        let param = param_key_for_path(plan.args(), &missing);
+
+        assert!(
+            plan.args()
+                .iter()
+                .any(|arg| arg.ends_with(&home.to_string_lossy().to_string()))
+        );
+        assert!(policy.contains(&format!("(deny file-read* (literal (param \"{param}\")))")));
+        assert!(policy.contains(&format!("(deny file-write* (literal (param \"{param}\")))")));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn absolute_path_under_cwd_missing_deny_is_rendered_as_concrete_guard() {
+        let root = unique_test_dir("absolute-under-cwd");
+        let missing = root.join("missing-deny");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![missing.to_string_lossy().to_string()],
+            vec![".".to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+        let policy = policy_arg(plan.args());
+        let param = param_key_for_path(plan.args(), &missing);
+
+        assert!(policy.contains(&format!("(deny file-read* (literal (param \"{param}\")))")));
+        assert!(policy.contains(&format!("(deny file-write* (literal (param \"{param}\")))")));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn missing_deny_guard_emits_literal_and_subpath_denies() {
+        let root = unique_test_dir("missing-deny");
+        let writable = root.join("writable");
+        std::fs::create_dir_all(&writable).expect("writable dir created");
+        let missing = writable.join("missing-deny");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![missing.to_string_lossy().to_string()],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+        let policy = policy_arg(plan.args());
+        let param = param_key_for_path(plan.args(), &missing);
+
+        assert!(policy.contains(&format!("(deny file-read* (literal (param \"{param}\")))")));
+        assert!(policy.contains(&format!("(deny file-write* (literal (param \"{param}\")))")));
+        assert!(policy.contains(&format!(
+            "(deny file-read*\n  (require-all (subpath (param \"{param}\"))"
+        )));
+        assert!(policy.contains(&format!(
+            "(deny file-write*\n  (require-all (subpath (param \"{param}\"))"
+        )));
+        assert!(!missing.exists());
     }
 
     #[test]

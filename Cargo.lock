@@ -789,6 +789,7 @@ version = "0.1.39"
 dependencies = [
  "dirs",
  "ignore",
+ "shellexpand",
  "thiserror",
 ]
 

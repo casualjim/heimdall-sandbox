@@ -148,7 +148,13 @@ impl Executor {
             .envs(self.child_environment(request));
         Self::configure_stdio(&mut command, request.stdio_policy());
         install_bubblewrap_child_setup(&mut command);
-        self.execute_bubblewrap_command(command, request.stdio_policy())
+        let result = self.execute_bubblewrap_command(command, request.stdio_policy());
+        let cleanup_result = plan.cleanup_missing_deny_guards();
+        match (result, cleanup_result) {
+            (Ok(exit_code), Ok(())) => Ok(exit_code),
+            (Err(error), Ok(())) | (Err(error), Err(_)) => Err(error),
+            (Ok(_), Err(error)) => Err(error.into()),
+        }
     }
 
     #[cfg(target_os = "linux")]

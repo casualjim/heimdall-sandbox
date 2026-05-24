@@ -11,4 +11,5 @@ version.workspace = true
 [dependencies]
 dirs.workspace = true
 ignore.workspace = true
+shellexpand.workspace = true
 thiserror.workspace = true

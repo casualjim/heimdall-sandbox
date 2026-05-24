@@ -47,6 +47,15 @@ fn unique_project_dir(name: &str) -> std::path::PathBuf {
 #[cfg(target_os = "macos")]
 fn seatbelt_available() -> bool {
     std::path::Path::new("/usr/bin/sandbox-exec").is_file()
+        && Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                "(version 1)\n(allow default)\n",
+                "--",
+                "/usr/bin/true",
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 fn run_policy(policy: &str) -> std::process::Output {
@@ -57,6 +66,18 @@ fn run_policy(policy: &str) -> std::process::Output {
 fn run_policy_with_home(policy: &str, home: &std::path::Path) -> std::process::Output {
     let mut command = sandbox();
     command.env("HOME", home);
+    run_policy_command(policy, command)
+}
+
+#[cfg(target_os = "linux")]
+fn run_policy_with_linux_env(
+    policy: &str,
+    envs: &[(&str, &std::path::Path)],
+) -> std::process::Output {
+    let mut command = sandbox();
+    for (key, value) in envs {
+        command.env(key, value);
+    }
     run_policy_command(policy, command)
 }
 
@@ -566,6 +587,176 @@ fn bubblewrap_writable_patterns_allow_edits_and_creation() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(host_contents.trim(), "edited");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_missing_absolute_deny_under_writable_blocks_creation() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-missing-deny-under-writable");
+    let writable = cwd.join("work");
+    std::fs::create_dir(&writable).expect("writable directory is created");
+    let denied = writable.join("blocked");
+    let policy = serde_json::json!({
+        "cwd": cwd,
+        "command": [
+            "sh",
+            "-c",
+            "echo allowed > work/allowed.txt; mkdir work/blocked 2>/dev/null && printf mkdir-ok || printf mkdir-blocked; (echo denied > work/blocked/file) 2>/dev/null && printf :write-ok || printf :write-blocked",
+        ],
+        "filesystem": {
+            "deny": [denied],
+            "writable": [writable],
+        },
+        "stdio": "piped",
+    })
+    .to_string();
+
+    let output = run_policy(&policy);
+    let allowed_contents =
+        std::fs::read_to_string(cwd.join("work/allowed.txt")).expect("allowed file is readable");
+    let denied_exists = cwd.join("work/blocked").exists();
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "mkdir-blocked:write-blocked"
+    );
+    assert_eq!(allowed_contents.trim(), "allowed");
+    assert!(!denied_exists);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_missing_home_deny_outside_writable_blocks_creation() {
+    if !bwrap_available() {
+        return;
+    }
+    let home = unique_home_dir("bwrap-missing-home-deny");
+    let denied = home.join(".vim");
+    let policy = serde_json::json!({
+        "cwd": home,
+        "command": [
+            "sh",
+            "-c",
+            "mkdir ~/.vim 2>/dev/null && printf mkdir-ok || printf mkdir-blocked",
+        ],
+        "filesystem": {
+            "deny": ["~/.vim"],
+        },
+        "stdio": "piped",
+    })
+    .to_string();
+
+    let output = run_policy_with_home(&policy, &home);
+    let denied_exists = denied.exists();
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "mkdir-blocked");
+    assert!(!denied_exists);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_mixed_existing_and_missing_home_denies_are_enforced() {
+    if !bwrap_available() {
+        return;
+    }
+    let home = unique_home_dir("bwrap-mixed-home-deny");
+    std::fs::create_dir_all(home.join(".ssh")).expect("ssh dir is created");
+    std::fs::write(home.join(".ssh/config"), "secret").expect("ssh config is written");
+    let missing_denied = home.join(".vim");
+    let policy = serde_json::json!({
+        "cwd": home,
+        "command": [
+            "sh",
+            "-c",
+            "cat ~/.ssh/config 2>/dev/null && printf ssh-leak || printf ssh-denied; mkdir ~/.vim 2>/dev/null && printf :vim-created || printf :vim-blocked",
+        ],
+        "filesystem": {
+            "deny": ["~/.ssh", "~/.vim"],
+        },
+        "stdio": "piped",
+    })
+    .to_string();
+
+    let output = run_policy_with_home(&policy, &home);
+    let missing_denied_exists = missing_denied.exists();
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ssh-denied:vim-blocked"
+    );
+    assert!(!missing_denied_exists);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_missing_concrete_policy_and_optional_support_paths_do_not_block_startup() {
+    if !bwrap_available() {
+        return;
+    }
+    let home = unique_home_dir("bwrap-missing-policy-startup");
+    std::fs::create_dir_all(home.join(".config")).expect("config dir is created");
+    std::fs::write(home.join(".config/secret"), "secret").expect("secret is written");
+    let missing_writable = home.join("missing-writable");
+    let missing_restored = home.join(".config/missing-restored");
+    let missing_socket = home.join("missing-agent.sock");
+    let policy = serde_json::json!({
+        "cwd": home,
+        "command": [
+            "sh",
+            "-c",
+            "printf started; test -e missing-writable || printf :missing-writable-skipped; cat .config/missing-restored 2>/dev/null && printf :restored-leak || printf :missing-restored-skipped; cat .config/secret 2>/dev/null && printf :secret-leak || printf :secret-denied",
+        ],
+        "filesystem": {
+            "deny": ["~/.config", "!~/.config/missing-restored"],
+            "writable": ["~/missing-writable"],
+        },
+        "stdio": "piped",
+    })
+    .to_string();
+
+    let output = run_policy_with_linux_env(
+        &policy,
+        &[
+            ("HOME", home.as_path()),
+            ("SSH_AUTH_SOCK", missing_socket.as_path()),
+        ],
+    );
+    let missing_writable_exists = missing_writable.exists();
+    let missing_restored_exists = missing_restored.exists();
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "started:missing-writable-skipped:missing-restored-skipped:secret-denied"
+    );
+    assert!(!missing_writable_exists);
+    assert!(!missing_restored_exists);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
