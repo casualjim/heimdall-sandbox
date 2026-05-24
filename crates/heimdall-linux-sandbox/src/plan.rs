@@ -833,6 +833,10 @@ mod tests {
         MaterializedFilesystemPolicy::empty()
     }
 
+    fn existing_bwrap_path() -> PathBuf {
+        std::env::current_exe().expect("test executable path exists")
+    }
+
     #[test]
     fn network_none_adds_unshare_net() {
         let cwd = std::env::current_dir().expect("cwd exists");
@@ -845,7 +849,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(plan.args.iter().any(|arg| arg == "--unshare-net"));
@@ -863,7 +867,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(!plan.args.iter().any(|arg| arg == "--unshare-net"));
@@ -881,7 +885,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(plan.args.iter().any(|arg| arg == "--unshare-user"));
@@ -902,7 +906,7 @@ mod tests {
             .into_plan_with_launcher(
                 empty_materialized_policy(),
                 BubblewrapLauncher {
-                    path: PathBuf::from("/usr/bin/bwrap"),
+                    path: existing_bwrap_path(),
                     supports_argv0: true,
                 },
             )
@@ -934,7 +938,7 @@ mod tests {
             .into_plan_with_launcher(
                 empty_materialized_policy(),
                 BubblewrapLauncher {
-                    path: PathBuf::from("/usr/bin/bwrap"),
+                    path: existing_bwrap_path(),
                     supports_argv0: false,
                 },
             )
@@ -986,7 +990,7 @@ mod tests {
             proc_mode: ProcMode::Disabled,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
 
         assert!(!plan.args.iter().any(|arg| arg == "--proc"));
@@ -1117,7 +1121,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(empty_materialized_policy(), PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
             .expect("plan builds");
         let args = plan
             .args
@@ -1200,7 +1204,7 @@ mod tests {
                     BTreeSet::from([cwd.clone()]),
                     BTreeSet::new(),
                 ),
-                PathBuf::from("/usr/bin/bwrap"),
+                existing_bwrap_path(),
             )
             .expect("plan builds");
         let args = plan
@@ -1257,7 +1261,7 @@ mod tests {
                     BTreeSet::from([writable.clone()]),
                     BTreeSet::new(),
                 ),
-                PathBuf::from("/usr/bin/bwrap"),
+                existing_bwrap_path(),
             )
             .expect("plan builds");
         std::fs::remove_dir_all(&root).expect("test dirs removed");
@@ -1324,7 +1328,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(materialized, PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(materialized, existing_bwrap_path())
             .expect("plan builds");
         let args = plan
             .args
@@ -1389,7 +1393,7 @@ mod tests {
             proc_mode: ProcMode::Default,
         };
         let plan = request
-            .into_plan_with_bwrap(materialized, PathBuf::from("/usr/bin/bwrap"))
+            .into_plan_with_bwrap(materialized, existing_bwrap_path())
             .expect("plan builds");
         let args = plan
             .args

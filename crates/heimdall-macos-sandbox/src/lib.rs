@@ -617,6 +617,18 @@ mod tests {
             .expect("param has key")
     }
 
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-seatbelt-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("test dir created");
+        root
+    }
+
     #[test]
     fn plan_uses_fixed_seatbelt_executable() {
         let cwd = std::env::current_dir().expect("cwd exists");
@@ -838,14 +850,112 @@ mod tests {
     }
 
     #[test]
-    fn missing_deny_guard_emits_literal_and_subpath_denies() {
-        let root = std::env::temp_dir().join(format!(
-            "heimdall-seatbelt-missing-deny-{}",
+    fn missing_writable_and_outside_deny_paths_are_not_rendered() {
+        let root = unique_test_dir("missing-skipped");
+        let missing_writable = root.join("missing-write");
+        let outside_deny = root.join("outside-deny");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![outside_deny.to_string_lossy().to_string()],
+            vec![missing_writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+
+        assert!(
+            !plan
+                .args()
+                .iter()
+                .any(|arg| arg.contains(missing_writable.to_string_lossy().as_ref()))
+        );
+        assert!(
+            !plan
+                .args()
+                .iter()
+                .any(|arg| arg.contains(outside_deny.to_string_lossy().as_ref()))
+        );
+        assert!(!missing_writable.exists());
+        assert!(!outside_deny.exists());
+    }
+
+    #[test]
+    fn tilde_existing_writable_and_missing_deny_guard_are_rendered() {
+        let root = unique_test_dir("tilde-policy");
+        let home = heimdall_sandbox_policy::home_dir().expect("home dir exists");
+        let missing = home.join(format!(
+            ".heimdall-seatbelt-missing-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time moves forward")
                 .as_nanos()
         ));
+        assert!(!missing.exists());
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![format!(
+                "~/{}",
+                missing
+                    .file_name()
+                    .expect("missing file name")
+                    .to_string_lossy()
+            )],
+            vec!["~".to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+        let policy = policy_arg(plan.args());
+        let param = param_key_for_path(plan.args(), &missing);
+
+        assert!(
+            plan.args()
+                .iter()
+                .any(|arg| arg.ends_with(&home.to_string_lossy().to_string()))
+        );
+        assert!(policy.contains(&format!("(deny file-read* (literal (param \"{param}\")))")));
+        assert!(policy.contains(&format!("(deny file-write* (literal (param \"{param}\")))")));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn absolute_path_under_cwd_missing_deny_is_rendered_as_concrete_guard() {
+        let root = unique_test_dir("absolute-under-cwd");
+        let missing = root.join("missing-deny");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![missing.to_string_lossy().to_string()],
+            vec![".".to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &filesystem_policy)
+            .materialize()
+            .expect("policy materializes");
+        let plan = request(&root, &argv, &filesystem_policy)
+            .into_plan_with_materialized(materialized)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+        let policy = policy_arg(plan.args());
+        let param = param_key_for_path(plan.args(), &missing);
+
+        assert!(policy.contains(&format!("(deny file-read* (literal (param \"{param}\")))")));
+        assert!(policy.contains(&format!("(deny file-write* (literal (param \"{param}\")))")));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn missing_deny_guard_emits_literal_and_subpath_denies() {
+        let root = unique_test_dir("missing-deny");
         let writable = root.join("writable");
         std::fs::create_dir_all(&writable).expect("writable dir created");
         let missing = writable.join("missing-deny");

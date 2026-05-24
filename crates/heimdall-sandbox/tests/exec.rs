@@ -47,6 +47,15 @@ fn unique_project_dir(name: &str) -> std::path::PathBuf {
 #[cfg(target_os = "macos")]
 fn seatbelt_available() -> bool {
     std::path::Path::new("/usr/bin/sandbox-exec").is_file()
+        && Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                "(version 1)\n(allow default)\n",
+                "--",
+                "/usr/bin/true",
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 fn run_policy(policy: &str) -> std::process::Output {
