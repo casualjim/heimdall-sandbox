@@ -98,6 +98,15 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    /// Concrete path existence could not be determined safely.
+    #[error("failed to determine whether {} exists: {source}", path.display())]
+    IndeterminatePath {
+        /// Path being classified.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Child network isolation policy.
@@ -191,6 +200,7 @@ pub struct MaterializedFilesystemPolicy {
     writable_targets: BTreeSet<PathBuf>,
     protected_targets: BTreeSet<PathBuf>,
     readable_targets: BTreeSet<PathBuf>,
+    missing_deny_guards: BTreeSet<PathBuf>,
 }
 
 impl MaterializedFilesystemPolicy {
@@ -208,6 +218,7 @@ impl MaterializedFilesystemPolicy {
             writable_targets,
             protected_targets,
             readable_targets: BTreeSet::new(),
+            missing_deny_guards: BTreeSet::new(),
         }
     }
 
@@ -219,6 +230,7 @@ impl MaterializedFilesystemPolicy {
             writable_targets: BTreeSet::new(),
             protected_targets: BTreeSet::new(),
             readable_targets: BTreeSet::new(),
+            missing_deny_guards: BTreeSet::new(),
         }
     }
 
@@ -246,6 +258,12 @@ impl MaterializedFilesystemPolicy {
         &self.readable_targets
     }
 
+    /// Confirmed-missing denied paths that remain creatable through writable directory targets.
+    #[must_use]
+    pub fn missing_deny_guards(&self) -> &BTreeSet<PathBuf> {
+        &self.missing_deny_guards
+    }
+
     /// Decompose into owned target sets.
     #[must_use]
     pub fn into_parts(self) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
@@ -255,6 +273,64 @@ impl MaterializedFilesystemPolicy {
             self.protected_targets,
         )
     }
+}
+
+/// Existence state for a concrete host path after literal expansion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcretePathState {
+    /// The final directory entry exists, including dangling final symlinks.
+    Existing,
+    /// The final entry or an ancestor is confirmed absent.
+    Missing,
+}
+
+impl ConcretePathState {
+    const fn is_existing(self) -> bool {
+        matches!(self, Self::Existing)
+    }
+
+    const fn is_missing(self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
+/// Classify a concrete absolute host path without following the final component.
+///
+/// # Errors
+///
+/// Returns an indeterminate-path error for permission, traversal, or other non-not-found failures.
+pub fn concrete_path_state(path: &Path) -> Result<ConcretePathState> {
+    let mut current = PathBuf::new();
+    let components = path.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(_) if index + 1 == components.len() => return Ok(ConcretePathState::Existing),
+            Ok(metadata) if metadata.file_type().is_symlink() => match current.canonicalize() {
+                Ok(canonical) => current = canonical,
+                Err(source) => {
+                    return Err(Error::IndeterminatePath {
+                        path: current,
+                        source,
+                    });
+                }
+            },
+            Ok(_) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ConcretePathState::Missing);
+            }
+            Err(source) => {
+                return Err(Error::IndeterminatePath {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(ConcretePathState::Existing)
 }
 
 /// Materializes cwd-relative gitignore-style filesystem policy into concrete paths.
@@ -300,9 +376,12 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             }
         }
 
+        let classified_deny = self.classified_literal_paths(self.policy.deny())?;
+        let classified_writable = self.classified_literal_paths(self.policy.writable())?;
+
         // Add external absolute paths directly as targets.
-        self.add_external_targets(self.policy.deny(), &mut deny_targets);
-        self.add_external_targets(self.policy.writable(), &mut writable_targets);
+        self.add_external_targets(&classified_deny, &mut deny_targets);
+        self.add_external_targets(&classified_writable, &mut writable_targets);
 
         self.apply_literal_specificity(&mut deny_targets, &mut writable_targets);
         let readable_targets = self.readable_targets(&deny_targets);
@@ -310,11 +389,14 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
 
         let protected_targets = self.protected_control_targets(&writable, &deny)?;
 
+        let missing_deny_guards = self.missing_deny_guards(&classified_deny, &writable_targets);
+
         Ok(MaterializedFilesystemPolicy {
             deny_targets,
             writable_targets,
             protected_targets,
             readable_targets,
+            missing_deny_guards,
         })
     }
 
@@ -325,13 +407,9 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
     /// External absolute paths are removed from the returned patterns and tracked
     /// separately so they can be added as direct targets without gitignore matching.
     fn expand_and_split(&self, patterns: &[String]) -> Vec<String> {
-        let home = home_dir();
         let mut result = Vec::with_capacity(patterns.len());
         for pattern in patterns {
-            let expanded = match &home {
-                Some(h) => pattern.replace('~', &h.to_string_lossy()),
-                None => pattern.clone(),
-            };
+            let expanded = expand_home_pattern(pattern);
             result.push(self.matcher_pattern(&expanded));
         }
         result
@@ -360,22 +438,64 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
         Some(relative.to_string_lossy().to_string())
     }
 
-    /// Add external absolute patterns directly as targets.
-    ///
-    /// External paths are absolute paths that exist on disk and are not under CWD.
-    /// They bypass gitignore matching entirely because the CWD walk cannot discover them.
-    fn add_external_targets(&self, patterns: &[String], targets: &mut BTreeSet<PathBuf>) {
-        let home = home_dir();
-        for pattern in patterns {
-            let expanded = match &home {
-                Some(h) => pattern.replace('~', &h.to_string_lossy()),
-                None => pattern.clone(),
-            };
-            let path = Path::new(&expanded);
-            if path.is_absolute() && !path.starts_with(self.cwd) && path.exists() {
-                targets.insert(path.to_path_buf());
+    /// Add concrete literal absolute patterns directly as targets when the host entry exists.
+    /// Missing ordinary host-backed paths are skipped here; missing deny paths that would be
+    /// creatable through a writable directory are recorded later as missing deny guards.
+    fn add_external_targets(
+        &self,
+        classified_paths: &[(PathBuf, ConcretePathState)],
+        targets: &mut BTreeSet<PathBuf>,
+    ) {
+        for (path, state) in classified_paths {
+            if state.is_existing() {
+                targets.insert(path.clone());
             }
         }
+    }
+
+    fn missing_deny_guards(
+        &self,
+        classified_deny: &[(PathBuf, ConcretePathState)],
+        writable_targets: &BTreeSet<PathBuf>,
+    ) -> BTreeSet<PathBuf> {
+        let writable_dirs = writable_targets
+            .iter()
+            .filter(|target| target.is_dir())
+            .collect::<Vec<_>>();
+        let mut guards = BTreeSet::new();
+        for (path, state) in classified_deny {
+            if state.is_missing()
+                && writable_dirs
+                    .iter()
+                    .any(|writable| path_has_prefix(path, writable))
+            {
+                guards.insert(path.clone());
+            }
+        }
+        guards
+    }
+
+    fn classified_literal_paths(
+        &self,
+        patterns: &[String],
+    ) -> Result<Vec<(PathBuf, ConcretePathState)>> {
+        let mut paths = Vec::new();
+        for pattern in patterns {
+            let Some(path) = self.literal_absolute_path(pattern) else {
+                continue;
+            };
+            let state = concrete_path_state(&path)?;
+            paths.push((path, state));
+        }
+        Ok(paths)
+    }
+
+    fn literal_absolute_path(&self, pattern: &str) -> Option<PathBuf> {
+        if is_non_literal_pattern(pattern) {
+            return None;
+        }
+        let path = PathBuf::from(expand_home_pattern(pattern));
+        path.is_absolute().then_some(path)
     }
 
     fn build_matcher(&self, patterns: &[String], fragment: &str) -> Result<Gitignore> {
@@ -443,12 +563,8 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
     /// Returns true when any writable pattern resolves to an absolute path that is an
     /// ancestor of CWD, meaning CWD and its contents are implicitly writable.
     fn cwd_covered_by_writable_ancestor(&self) -> bool {
-        let home = home_dir();
         self.policy.writable().iter().any(|pattern| {
-            let expanded = match &home {
-                Some(h) => pattern.replace('~', &h.to_string_lossy()),
-                None => pattern.clone(),
-            };
+            let expanded = expand_home_pattern(pattern);
             let path = Path::new(&expanded);
             path.is_absolute() && path.is_dir() && self.cwd.starts_with(path)
         })
@@ -529,12 +645,7 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
     }
 
     fn literal_path(&self, pattern: &str) -> Option<PathBuf> {
-        let home = home_dir();
-        let expanded = match &home {
-            Some(h) => pattern.replace('~', &h.to_string_lossy()),
-            None => pattern.to_string(),
-        };
-        let path = PathBuf::from(expanded);
+        let path = PathBuf::from(expand_home_pattern(pattern));
         Some(if path.is_absolute() {
             path
         } else {
@@ -628,6 +739,13 @@ pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+fn expand_home_pattern(pattern: &str) -> String {
+    let Some(body) = pattern.strip_prefix('!') else {
+        return shellexpand::tilde(pattern).into_owned();
+    };
+    format!("!{}", shellexpand::tilde(body))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiteralRuleKind {
     Deny,
@@ -667,6 +785,10 @@ fn is_non_literal_pattern(pattern: &str) -> bool {
         || pattern
             .chars()
             .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+}
+
+fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
+    path == prefix || path.starts_with(prefix)
 }
 
 fn has_denied_directory_ancestor(path: &Path, deny_targets: &BTreeSet<PathBuf>) -> bool {
@@ -981,6 +1103,150 @@ mod tests {
             materialized.writable_targets().contains(&target),
             "~/.config should expand and be added as a writable target"
         );
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+    #[test]
+    fn concrete_classifier_handles_absolute_missing_existing_and_tilde_inputs() {
+        let cwd = unique_dir("concrete-classifier");
+        let existing = cwd.join("exists");
+        std::fs::write(&existing, "data").expect("file written");
+        let missing = cwd.join("missing");
+
+        assert_eq!(
+            concrete_path_state(&existing).expect("existing path classifies"),
+            ConcretePathState::Existing
+        );
+        assert_eq!(
+            concrete_path_state(&missing).expect("missing path classifies"),
+            ConcretePathState::Missing
+        );
+        if let Some(home) = home_dir() {
+            assert_eq!(
+                concrete_path_state(&home).expect("home path classifies"),
+                ConcretePathState::Existing
+            );
+        }
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_component_symlinks_are_existing_even_when_dangling() {
+        use std::os::unix::fs::symlink;
+
+        let cwd = unique_dir("concrete-symlink");
+        let target = cwd.join("target");
+        let link = cwd.join("link");
+        let dangling = cwd.join("dangling");
+        std::fs::write(&target, "data").expect("target written");
+        symlink(&target, &link).expect("symlink created");
+        symlink(cwd.join("absent"), &dangling).expect("dangling symlink created");
+
+        assert_eq!(
+            concrete_path_state(&link).expect("link classifies"),
+            ConcretePathState::Existing
+        );
+        assert_eq!(
+            concrete_path_state(&dangling).expect("dangling link classifies"),
+            ConcretePathState::Existing
+        );
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[test]
+    fn missing_ancestor_classifies_requested_path_as_missing() {
+        let cwd = unique_dir("missing-ancestor");
+        let requested = cwd.join("absent").join("child");
+
+        assert_eq!(
+            concrete_path_state(&requested).expect("path classifies"),
+            ConcretePathState::Missing
+        );
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_ancestor_canonicalization_failure_is_indeterminate() {
+        use std::os::unix::fs::symlink;
+
+        let cwd = unique_dir("indeterminate-ancestor");
+        let dangling = cwd.join("dangling-parent");
+        symlink(cwd.join("absent"), &dangling).expect("dangling symlink created");
+        let requested = dangling.join("child");
+
+        assert!(matches!(
+            concrete_path_state(&requested),
+            Err(Error::IndeterminatePath { .. })
+        ));
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[test]
+    fn missing_literal_writable_and_readable_targets_are_skipped() {
+        let cwd = unique_dir("missing-writable-readable");
+        let missing_writable = cwd.join("missing-write");
+        let missing_readable = cwd.join("missing-read");
+        let policy = FilesystemPolicy::new(
+            vec![format!("!{}", missing_readable.display())],
+            vec![missing_writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(!materialized.writable_targets().contains(&missing_writable));
+        assert!(!materialized.readable_targets().contains(&missing_readable));
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[test]
+    fn missing_denies_are_skipped_unless_covered_by_existing_writable_directory() {
+        let cwd = unique_dir("missing-deny-guards");
+        let writable = cwd.join("writable");
+        std::fs::create_dir(&writable).expect("writable dir created");
+        let guarded = writable.join("missing");
+        let skipped = cwd.join("outside-missing");
+        let policy = FilesystemPolicy::new(
+            vec![
+                guarded.to_string_lossy().to_string(),
+                skipped.to_string_lossy().to_string(),
+            ],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(materialized.writable_targets().contains(&writable));
+        assert!(!materialized.deny_targets().contains(&guarded));
+        assert!(!materialized.deny_targets().contains(&skipped));
+        assert!(materialized.missing_deny_guards().contains(&guarded));
+        assert!(!materialized.missing_deny_guards().contains(&skipped));
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
+    }
+
+    #[test]
+    fn literal_absolute_paths_under_cwd_are_concrete_before_pattern_matching() {
+        let cwd = unique_dir("absolute-under-cwd");
+        let missing = cwd.join("missing");
+        let policy = FilesystemPolicy::new(
+            vec![missing.to_string_lossy().to_string()],
+            vec![".".to_string()],
+            Default::default(),
+        );
+
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(materialized.writable_targets().contains(&cwd));
+        assert!(materialized.missing_deny_guards().contains(&missing));
+        assert!(!missing.exists());
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
     }
 }

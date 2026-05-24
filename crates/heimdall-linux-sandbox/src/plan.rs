@@ -8,7 +8,7 @@ use std::process::Command;
 use crate::launcher::BubblewrapLauncher;
 use crate::policy::{
     FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy, NetworkMode,
-    ProcMode,
+    ProcMode, concrete_path_state,
 };
 use crate::virtual_files::{BubblewrapResources, VirtualDataFile};
 use crate::{Error, Result};
@@ -257,6 +257,12 @@ impl<'a> PolicyMount<'a> {
         ) && self.source.is_dir()
     }
 
+    fn is_missing_deny_guard_for(&self, parent: &Self) -> bool {
+        self.kind == PolicyMountKind::MissingDenyGuard
+            && self.destination != parent.destination
+            && self.destination.starts_with(parent.destination)
+    }
+
     fn must_stage_mountpoint_for(&self, child: &Self) -> bool {
         self.is_directory_mask()
             && child.destination != self.destination
@@ -266,6 +272,7 @@ impl<'a> PolicyMount<'a> {
     fn mountpoint_kind(&self) -> MountpointKind {
         match self.kind {
             PolicyMountKind::VirtualFile { .. } => MountpointKind::File,
+            PolicyMountKind::MissingDenyGuard => MountpointKind::Directory,
             PolicyMountKind::Writable
             | PolicyMountKind::Readable
             | PolicyMountKind::Deny
@@ -293,6 +300,7 @@ enum PolicyMountKind {
     VirtualFile { fd: i32 },
     Deny,
     Protected,
+    MissingDenyGuard,
 }
 
 impl PolicyMountKind {
@@ -303,6 +311,7 @@ impl PolicyMountKind {
             Self::VirtualFile { .. } => 2,
             Self::Deny => 3,
             Self::Protected => 4,
+            Self::MissingDenyGuard => 5,
         }
     }
 }
@@ -333,7 +342,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
     fn build(mut self) -> Result<Vec<OsString>> {
         self.add_namespaces();
-        self.add_readonly_base_filesystem();
+        self.add_readonly_base_filesystem()?;
         self.add_policy_mounts();
         self.add_inner_reentry()?;
         Ok(self.args)
@@ -355,23 +364,26 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.tmpfs_with_perms(Path::new("/tmp"), "1777");
     }
 
-    fn add_readonly_base_filesystem(&mut self) {
+    fn add_readonly_base_filesystem(&mut self) -> Result<()> {
+        // Optional support mounts are skipped only when confirmed missing; indeterminate
+        // states remain planning errors so policy never weakens on ambiguous host state.
         for root in Self::platform_read_roots() {
-            if root.exists() {
+            if optional_path_exists(&root)? {
                 self.ro_bind(&root, &root);
             }
         }
         if self.request.network_mode == NetworkMode::Host {
-            self.add_host_network_runtime_paths();
+            self.add_host_network_runtime_paths()?;
         }
-        self.add_agent_runtime_sockets();
+        self.add_agent_runtime_sockets()?;
         if let Some(home) = dirs_home() {
             for alias in path_aliases(&home) {
-                if alias.is_dir() {
+                if optional_path_exists(&alias)? && alias.is_dir() {
                     self.ro_bind(&alias, &alias);
                 }
             }
         }
+        Ok(())
     }
 
     fn add_policy_mounts(&mut self) {
@@ -406,6 +418,16 @@ impl<'a> BubblewrapArgBuilder<'a> {
             };
             PolicyMount::deny(source, path)
         }));
+        mounts.extend(
+            self.materialized
+                .missing_deny_guards()
+                .iter()
+                .map(|path| PolicyMount {
+                    source: empty_dir.as_path(),
+                    destination: path.as_path(),
+                    kind: PolicyMountKind::MissingDenyGuard,
+                }),
+        );
         mounts.extend(self.materialized.protected_targets().iter().map(|path| {
             let source = if path.exists() && !path.is_dir() {
                 empty_file.as_path()
@@ -439,6 +461,29 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 continue;
             }
 
+            if mount.kind == PolicyMountKind::Writable
+                && mounts
+                    .iter()
+                    .any(|candidate| candidate.is_missing_deny_guard_for(&mount))
+            {
+                // Missing deny guards under a writable parent need a sandbox-only
+                // mountpoint before the host writable tree is visible. Stage the
+                // writable destination as tmpfs, create/mount the guarded child
+                // there, then bind the writable parent and later layer the final
+                // guard in sorted order. This preserves deny-over-writable without
+                // creating the missing path on the host.
+                self.tmpfs(mount.destination);
+                for candidate in mounts
+                    .iter()
+                    .filter(|candidate| candidate.is_missing_deny_guard_for(&mount))
+                {
+                    self.add_staged_mountpoint(mount.destination, candidate, &empty_file);
+                    self.ro_bind(candidate.source, candidate.destination);
+                }
+                self.add_policy_mount(mount);
+                continue;
+            }
+
             self.add_policy_mount(mount);
         }
     }
@@ -452,7 +497,9 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 self.args.push(fd.to_string().into());
                 self.args.push(mount.destination.as_os_str().to_os_string());
             }
-            PolicyMountKind::Deny | PolicyMountKind::Protected => {
+            PolicyMountKind::Deny
+            | PolicyMountKind::Protected
+            | PolicyMountKind::MissingDenyGuard => {
                 self.ro_bind(mount.source, mount.destination);
             }
         }
@@ -537,31 +584,36 @@ impl<'a> BubblewrapArgBuilder<'a> {
             .collect()
     }
 
-    fn add_host_network_runtime_paths(&mut self) {
-        self.add_resolver_symlink_target();
-        self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"));
+    fn add_host_network_runtime_paths(&mut self) -> Result<()> {
+        self.add_resolver_symlink_target()?;
+        self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"))
     }
 
-    fn add_agent_runtime_sockets(&mut self) {
-        for socket in Self::agent_runtime_sockets() {
-            self.add_runtime_socket(&socket);
+    fn add_agent_runtime_sockets(&mut self) -> Result<()> {
+        for socket in Self::agent_runtime_sockets()? {
+            self.add_runtime_socket(&socket)?;
         }
+        Ok(())
     }
 
-    fn add_resolver_symlink_target(&mut self) {
+    fn add_resolver_symlink_target(&mut self) -> Result<()> {
         let Some(target) = Self::resolver_symlink_target(Path::new("/etc/resolv.conf")) else {
-            return;
+            return Ok(());
         };
-        self.add_destination_parent_dirs(&target);
-        self.ro_bind(&target, &target);
+        if optional_path_exists(&target)? {
+            self.add_destination_parent_dirs(&target);
+            self.ro_bind(&target, &target);
+        }
+        Ok(())
     }
 
-    fn add_runtime_socket(&mut self, socket: &Path) {
-        if !socket.exists() {
-            return;
+    fn add_runtime_socket(&mut self, socket: &Path) -> Result<()> {
+        if !optional_path_exists(socket)? {
+            return Ok(());
         }
         self.add_destination_parent_dirs(socket);
         self.bind(socket, socket);
+        Ok(())
     }
 
     fn resolver_symlink_target(resolv_conf: &Path) -> Option<PathBuf> {
@@ -574,7 +626,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
         absolute.canonicalize().ok()
     }
 
-    fn agent_runtime_sockets() -> BTreeSet<PathBuf> {
+    fn agent_runtime_sockets() -> Result<BTreeSet<PathBuf>> {
         let mut sockets = BTreeSet::new();
         for key in ["SSH_AUTH_SOCK", "AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
             if let Some(path) = env_socket_path(env::var_os(key).as_deref()) {
@@ -592,12 +644,12 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 "S.gpg-agent.browser",
             ] {
                 let path = runtime_dir.join("gnupg").join(name);
-                if path.exists() {
+                if optional_path_exists(&path)? {
                     sockets.insert(path);
                 }
             }
         }
-        sockets
+        Ok(sockets)
     }
 
     fn add_destination_parent_dirs(&mut self, destination: &Path) {
@@ -700,6 +752,12 @@ fn gpg_agent_info_socket(value: Option<&OsStr>) -> Option<PathBuf> {
     let value = value?.to_string_lossy();
     let path = value.split(':').next()?;
     env_socket_path(Some(OsStr::new(path)))
+}
+
+fn optional_path_exists(path: &Path) -> Result<bool> {
+    concrete_path_state(path)
+        .map(|state| matches!(state, heimdall_sandbox_policy::ConcretePathState::Existing))
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1114,5 +1172,125 @@ mod tests {
         assert!(tmpfs_parent < child_mountpoint);
         assert!(child_mountpoint < seal_parent);
         assert!(seal_parent < bind_child);
+    }
+    #[test]
+    fn missing_policy_paths_are_skipped_or_guarded_in_bubblewrap_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-missing-policy-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let writable = root.join("writable");
+        std::fs::create_dir_all(&writable).expect("test dirs created");
+        let missing_writable = root.join("missing-write");
+        let missing_deny_outside = root.join("missing-deny-outside");
+        let missing_deny_guard = writable.join("missing-deny-guard");
+        let policy = FilesystemPolicy::new(
+            vec![
+                missing_deny_outside.to_string_lossy().to_string(),
+                missing_deny_guard.to_string_lossy().to_string(),
+            ],
+            vec![
+                writable.to_string_lossy().to_string(),
+                missing_writable.to_string_lossy().to_string(),
+            ],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &policy)
+            .materialize()
+            .expect("policy materializes");
+        let request = BubblewrapRequest {
+            cwd: &root,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &policy,
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(materialized, PathBuf::from("/usr/bin/bwrap"))
+            .expect("plan builds");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(!args.windows(3).any(|w| {
+            (w[0] == "--bind" || w[0] == "--ro-bind") && w[2] == missing_writable.to_string_lossy()
+        }));
+        assert!(!args.windows(3).any(|w| {
+            (w[0] == "--bind" || w[0] == "--ro-bind")
+                && w[2] == missing_deny_outside.to_string_lossy()
+        }));
+        let staged_guard = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[2] == missing_deny_guard.to_string_lossy())
+            .expect("missing deny guard is staged");
+        let writable_bind = args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[2] == writable.to_string_lossy())
+            .expect("writable bind exists");
+        assert!(staged_guard < writable_bind);
+        assert!(
+            args.windows(3)
+                .skip(writable_bind + 1)
+                .any(|w| { w[0] == "--ro-bind" && w[2] == missing_deny_guard.to_string_lossy() })
+        );
+        assert!(!missing_writable.exists());
+        assert!(!missing_deny_outside.exists());
+        assert!(!missing_deny_guard.exists());
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+    }
+
+    #[test]
+    fn existing_policy_paths_keep_bubblewrap_mounts() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-existing-policy-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let writable = root.join("writable");
+        let denied = root.join("denied");
+        std::fs::create_dir_all(&writable).expect("writable dir created");
+        std::fs::write(&denied, "secret").expect("denied file written");
+        let policy = FilesystemPolicy::new(
+            vec![denied.to_string_lossy().to_string()],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &policy)
+            .materialize()
+            .expect("policy materializes");
+        let request = BubblewrapRequest {
+            cwd: &root,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &policy,
+            proc_mode: ProcMode::Default,
+        };
+        let plan = request
+            .into_plan_with_bwrap(materialized, PathBuf::from("/usr/bin/bwrap"))
+            .expect("plan builds");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.windows(3)
+                .any(|w| { w[0] == "--bind" && w[2] == writable.to_string_lossy() })
+        );
+        assert!(
+            args.windows(3)
+                .any(|w| { w[0] == "--ro-bind" && w[2] == denied.to_string_lossy() })
+        );
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
     }
 }

@@ -568,6 +568,50 @@ fn bubblewrap_writable_patterns_allow_edits_and_creation() {
     assert_eq!(host_contents.trim(), "edited");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_missing_absolute_deny_under_writable_blocks_creation() {
+    if !bwrap_available() {
+        return;
+    }
+    let cwd = unique_temp_dir("bwrap-missing-deny-under-writable");
+    let writable = cwd.join("work");
+    std::fs::create_dir(&writable).expect("writable directory is created");
+    let denied = writable.join("blocked");
+    let policy = serde_json::json!({
+        "cwd": cwd,
+        "command": [
+            "sh",
+            "-c",
+            "echo allowed > work/allowed.txt; mkdir work/blocked 2>/dev/null && printf mkdir-ok || printf mkdir-blocked; (echo denied > work/blocked/file) 2>/dev/null && printf :write-ok || printf :write-blocked",
+        ],
+        "filesystem": {
+            "deny": [denied],
+            "writable": [writable],
+        },
+        "stdio": "piped",
+    })
+    .to_string();
+
+    let output = run_policy(&policy);
+    let allowed_contents =
+        std::fs::read_to_string(cwd.join("work/allowed.txt")).expect("allowed file is readable");
+    let denied_exists = cwd.join("work/blocked").exists();
+    std::fs::remove_dir_all(cwd).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "mkdir-blocked:write-blocked"
+    );
+    assert_eq!(allowed_contents.trim(), "allowed");
+    assert!(!denied_exists);
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn home_policy(
     home: &std::path::Path,
