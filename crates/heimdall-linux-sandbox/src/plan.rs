@@ -49,6 +49,12 @@ const GPGCONF_SOCKET_KEYS: &[&str] = &[
     "dirmngr-socket",
 ];
 
+#[derive(Debug, Default)]
+struct AgentRuntimePaths {
+    sockets: BTreeSet<PathBuf>,
+    readable_dirs: BTreeSet<PathBuf>,
+}
+
 impl BubblewrapRequest<'_> {
     /// Convert this request into a prepared bubblewrap invocation.
     ///
@@ -286,6 +292,22 @@ impl<'a> PolicyMount<'a> {
         }
     }
 
+    fn agent_readable(path: &'a Path) -> Self {
+        Self {
+            source: path,
+            destination: path,
+            kind: PolicyMountKind::AgentReadable,
+        }
+    }
+
+    fn runtime_socket(path: &'a Path) -> Self {
+        Self {
+            source: path,
+            destination: path,
+            kind: PolicyMountKind::RuntimeSocket,
+        }
+    }
+
     fn sort_key(&self) -> (usize, u8, PathBuf) {
         (
             self.destination.components().count(),
@@ -315,12 +337,15 @@ impl<'a> PolicyMount<'a> {
 
     fn mountpoint_kind(&self) -> MountpointKind {
         match self.kind {
-            PolicyMountKind::VirtualFile { .. } => MountpointKind::File,
+            PolicyMountKind::VirtualFile { .. } | PolicyMountKind::RuntimeSocket => {
+                MountpointKind::File
+            }
             PolicyMountKind::MissingDenyGuard => MountpointKind::Directory,
             PolicyMountKind::Writable
             | PolicyMountKind::Readable
             | PolicyMountKind::Deny
-            | PolicyMountKind::Protected => {
+            | PolicyMountKind::Protected
+            | PolicyMountKind::AgentReadable => {
                 if self.source.is_dir() {
                     MountpointKind::Directory
                 } else {
@@ -345,6 +370,8 @@ enum PolicyMountKind {
     Deny,
     Protected,
     MissingDenyGuard,
+    AgentReadable,
+    RuntimeSocket,
 }
 
 impl PolicyMountKind {
@@ -356,6 +383,8 @@ impl PolicyMountKind {
             Self::Deny => 3,
             Self::Protected => 4,
             Self::MissingDenyGuard => 5,
+            Self::AgentReadable => 6,
+            Self::RuntimeSocket => 7,
         }
     }
 }
@@ -425,7 +454,6 @@ impl<'a> BubblewrapArgBuilder<'a> {
         if self.request.network_mode == NetworkMode::Host {
             self.add_host_network_runtime_paths()?;
         }
-        self.add_agent_runtime_sockets(self.request.agent_policy)?;
         if let Some(home) = dirs_home() {
             for alias in path_aliases(&home) {
                 if optional_path_exists(&alias)? && alias.is_dir() {
@@ -441,6 +469,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
 
         let empty_file = self.resources.empty_file();
         let empty_dir = self.resources.empty_dir();
+        let agent_runtime_paths = Self::agent_runtime_paths(self.request.agent_policy)?;
         let mut mounts = Vec::new();
         mounts.extend(
             self.materialized
@@ -486,6 +515,18 @@ impl<'a> BubblewrapArgBuilder<'a> {
             };
             PolicyMount::protected(source, path)
         }));
+        mounts.extend(
+            agent_runtime_paths
+                .readable_dirs
+                .iter()
+                .map(|path| PolicyMount::agent_readable(path.as_path())),
+        );
+        mounts.extend(
+            agent_runtime_paths
+                .sockets
+                .iter()
+                .map(|path| PolicyMount::runtime_socket(path.as_path())),
+        );
         mounts.sort_by_key(PolicyMount::sort_key);
 
         for index in 0..mounts.len() {
@@ -545,7 +586,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 let destination = bubblewrap_mount_destination(mount.destination)?;
                 self.bind(mount.source, &destination);
             }
-            PolicyMountKind::Readable => {
+            PolicyMountKind::Readable | PolicyMountKind::AgentReadable => {
                 let destination = bubblewrap_mount_destination(mount.destination)?;
                 self.ro_bind(mount.source, &destination);
             }
@@ -560,6 +601,9 @@ impl<'a> BubblewrapArgBuilder<'a> {
             }
             PolicyMountKind::MissingDenyGuard => {
                 self.ro_bind(mount.source, mount.destination);
+            }
+            PolicyMountKind::RuntimeSocket => {
+                self.bind(mount.source, mount.destination);
             }
         }
         Ok(())
@@ -655,13 +699,6 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"))
     }
 
-    fn add_agent_runtime_sockets(&mut self, agent_policy: AgentPolicy) -> Result<()> {
-        for socket in Self::agent_runtime_sockets(agent_policy)? {
-            self.add_runtime_socket(&socket)?;
-        }
-        Ok(())
-    }
-
     fn add_resolver_symlink_target(&mut self) -> Result<()> {
         let Some(target) = Self::resolver_symlink_target(Path::new("/etc/resolv.conf")) else {
             return Ok(());
@@ -692,46 +729,57 @@ impl<'a> BubblewrapArgBuilder<'a> {
         absolute.canonicalize().ok()
     }
 
-    fn agent_runtime_sockets(agent_policy: AgentPolicy) -> Result<BTreeSet<PathBuf>> {
-        let mut sockets = BTreeSet::new();
+    fn agent_runtime_paths(agent_policy: AgentPolicy) -> Result<AgentRuntimePaths> {
+        let mut paths = AgentRuntimePaths::default();
         if agent_policy.ssh_agent()
             && let Some(path) = env_socket_path(env::var_os("SSH_AUTH_SOCK").as_deref())?
         {
-            sockets.insert(path);
+            paths.sockets.insert(path);
         }
         if agent_policy.age_agent() {
             for key in ["AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
                 if let Some(path) = env_socket_path(env::var_os(key).as_deref())? {
-                    sockets.insert(path);
+                    paths.sockets.insert(path);
                 }
             }
         }
         if agent_policy.gpg_agent() {
             if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref())? {
-                sockets.insert(path);
+                paths.sockets.insert(path);
             }
             if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-                Self::insert_existing_gpg_socket_names(&mut sockets, &runtime_dir.join("gnupg"))?;
+                Self::insert_existing_gpg_socket_names(&mut paths, &runtime_dir.join("gnupg"))?;
             }
-            Self::insert_gpgconf_runtime_sockets(&mut sockets)?;
+            Self::insert_gpgconf_runtime_paths(&mut paths)?;
         }
-        Ok(sockets)
+        Ok(paths)
     }
 
     fn insert_existing_gpg_socket_names(
-        sockets: &mut BTreeSet<PathBuf>,
+        paths: &mut AgentRuntimePaths,
         socket_dir: &Path,
     ) -> Result<()> {
+        Self::insert_existing_agent_readable_dir(paths, socket_dir)?;
         for name in GPG_RUNTIME_SOCKET_NAMES {
             let path = socket_dir.join(name);
             if optional_path_exists(&path)? {
-                sockets.insert(path);
+                paths.sockets.insert(path);
             }
         }
         Ok(())
     }
 
-    fn insert_gpgconf_runtime_sockets(sockets: &mut BTreeSet<PathBuf>) -> Result<()> {
+    fn insert_existing_agent_readable_dir(
+        paths: &mut AgentRuntimePaths,
+        directory: &Path,
+    ) -> Result<()> {
+        if directory.is_absolute() && optional_path_exists(directory)? && directory.is_dir() {
+            paths.readable_dirs.insert(directory.to_path_buf());
+        }
+        Ok(())
+    }
+
+    fn insert_gpgconf_runtime_paths(paths: &mut AgentRuntimePaths) -> Result<()> {
         let output = match Command::new("gpgconf").arg("--list-dirs").output() {
             Ok(output) => output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -748,26 +796,28 @@ impl<'a> BubblewrapArgBuilder<'a> {
             )));
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Self::insert_gpgconf_runtime_sockets_from_list_dirs(sockets, &stdout)
+        Self::insert_gpgconf_runtime_paths_from_list_dirs(paths, &stdout)
     }
 
-    fn insert_gpgconf_runtime_sockets_from_list_dirs(
-        sockets: &mut BTreeSet<PathBuf>,
+    fn insert_gpgconf_runtime_paths_from_list_dirs(
+        paths: &mut AgentRuntimePaths,
         list_dirs: &str,
     ) -> Result<()> {
         for line in list_dirs.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
-            if key == "socketdir" {
+            if key == "homedir" {
+                Self::insert_existing_agent_readable_dir(paths, &PathBuf::from(value))?;
+            } else if key == "socketdir" {
                 let socket_dir = PathBuf::from(value);
                 if socket_dir.is_absolute() {
-                    Self::insert_existing_gpg_socket_names(sockets, &socket_dir)?;
+                    Self::insert_existing_gpg_socket_names(paths, &socket_dir)?;
                 }
             } else if GPGCONF_SOCKET_KEYS.contains(&key)
                 && let Some(path) = env_socket_path(Some(OsStr::new(value)))?
             {
-                sockets.insert(path);
+                paths.sockets.insert(path);
             }
         }
         Ok(())
@@ -1148,10 +1198,11 @@ mod tests {
 
     #[test]
     fn default_agent_policy_mounts_no_agent_sockets() {
-        let sockets = BubblewrapArgBuilder::agent_runtime_sockets(AgentPolicy::default())
+        let paths = BubblewrapArgBuilder::agent_runtime_paths(AgentPolicy::default())
             .expect("default agent discovery succeeds");
 
-        assert!(sockets.is_empty());
+        assert!(paths.sockets.is_empty());
+        assert!(paths.readable_dirs.is_empty());
     }
 
     #[test]
@@ -1172,19 +1223,17 @@ mod tests {
         let browser_socket = socket_dir.join("S.gpg-agent.browser");
         std::fs::write(&browser_socket, "placeholder").expect("browser socket placeholder written");
         let list_dirs = format!(
-            "socketdir:{}\nagent-browser-socket:{}\nkeyboxd-socket:{}\ndirmngr-socket:{}\n",
+            "homedir:{}\nsocketdir:{}\nagent-browser-socket:{}\nkeyboxd-socket:{}\ndirmngr-socket:{}\n",
+            socket_dir.display(),
             socket_dir.display(),
             browser_socket.display(),
             socket_dir.join("S.keyboxd").display(),
             socket_dir.join("S.dirmngr").display()
         );
-        let mut sockets = BTreeSet::new();
+        let mut paths = AgentRuntimePaths::default();
 
-        BubblewrapArgBuilder::insert_gpgconf_runtime_sockets_from_list_dirs(
-            &mut sockets,
-            &list_dirs,
-        )
-        .expect("gpgconf socket output parses");
+        BubblewrapArgBuilder::insert_gpgconf_runtime_paths_from_list_dirs(&mut paths, &list_dirs)
+            .expect("gpgconf socket output parses");
 
         for expected in [
             socket_dir.join("S.gpg-agent"),
@@ -1193,11 +1242,12 @@ mod tests {
             browser_socket,
         ] {
             assert!(
-                sockets.contains(&expected),
+                paths.sockets.contains(&expected),
                 "missing socket {}",
                 expected.display()
             );
         }
+        assert!(paths.readable_dirs.contains(&socket_dir));
         std::fs::remove_dir_all(root).expect("test dir removed");
     }
 
