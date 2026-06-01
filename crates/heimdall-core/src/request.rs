@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use heimdall_sandbox_policy::{
-    FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
+    AgentPolicy, FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
 };
 
 use crate::{Error, Result};
@@ -87,6 +87,7 @@ pub struct ExecRequest {
     network_mode: NetworkMode,
     filesystem_policy: FilesystemPolicy,
     proc_mode: ProcMode,
+    agent_policy: AgentPolicy,
 }
 
 impl ExecRequest {
@@ -116,6 +117,7 @@ impl ExecRequest {
             network_mode: NetworkMode::Host,
             filesystem_policy: FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         })
     }
 
@@ -168,12 +170,21 @@ impl ExecRequest {
         self
     }
 
+    /// Set the host agent socket mount policy.
+    #[must_use]
+    pub const fn with_agent_policy(mut self, agent_policy: AgentPolicy) -> Self {
+        self.agent_policy = agent_policy;
+        self
+    }
+
     /// Whether this request needs OS-level isolation.
     ///
     /// Returns `true` when network isolation is requested or filesystem policy is non-empty.
     #[must_use]
     pub fn needs_isolation(&self) -> bool {
-        self.network_mode == NetworkMode::None || !self.filesystem_policy.is_empty()
+        self.network_mode == NetworkMode::None
+            || !self.filesystem_policy.is_empty()
+            || !self.agent_policy.is_empty()
     }
 
     /// Child working directory.
@@ -228,6 +239,12 @@ impl ExecRequest {
     #[must_use]
     pub const fn proc_mode(&self) -> ProcMode {
         self.proc_mode
+    }
+
+    /// Host agent socket mount policy.
+    #[must_use]
+    pub const fn agent_policy(&self) -> AgentPolicy {
+        self.agent_policy
     }
 }
 

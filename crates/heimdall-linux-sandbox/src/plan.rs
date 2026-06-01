@@ -7,8 +7,8 @@ use std::process::Command;
 
 use crate::launcher::BubblewrapLauncher;
 use crate::policy::{
-    FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy, NetworkMode,
-    ProcMode, concrete_path_state,
+    AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy,
+    NetworkMode, ProcMode, concrete_path_state,
 };
 use crate::virtual_files::{BubblewrapResources, VirtualDataFile};
 use crate::{Error, Result};
@@ -27,7 +27,27 @@ pub struct BubblewrapRequest<'a> {
     pub filesystem_policy: &'a FilesystemPolicy,
     /// Child proc mount policy.
     pub proc_mode: ProcMode,
+    /// Host agent sockets explicitly enabled for mounting.
+    pub agent_policy: AgentPolicy,
 }
+
+const GPG_RUNTIME_SOCKET_NAMES: &[&str] = &[
+    "S.gpg-agent",
+    "S.gpg-agent.extra",
+    "S.gpg-agent.ssh",
+    "S.gpg-agent.browser",
+    "S.keyboxd",
+    "S.dirmngr",
+];
+
+const GPGCONF_SOCKET_KEYS: &[&str] = &[
+    "agent-socket",
+    "agent-ssh-socket",
+    "agent-extra-socket",
+    "agent-browser-socket",
+    "keyboxd-socket",
+    "dirmngr-socket",
+];
 
 impl BubblewrapRequest<'_> {
     /// Convert this request into a prepared bubblewrap invocation.
@@ -405,7 +425,7 @@ impl<'a> BubblewrapArgBuilder<'a> {
         if self.request.network_mode == NetworkMode::Host {
             self.add_host_network_runtime_paths()?;
         }
-        self.add_agent_runtime_sockets()?;
+        self.add_agent_runtime_sockets(self.request.agent_policy)?;
         if let Some(home) = dirs_home() {
             for alias in path_aliases(&home) {
                 if optional_path_exists(&alias)? && alias.is_dir() {
@@ -635,8 +655,8 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.add_runtime_socket(Path::new("/run/dbus/system_bus_socket"))
     }
 
-    fn add_agent_runtime_sockets(&mut self) -> Result<()> {
-        for socket in Self::agent_runtime_sockets()? {
+    fn add_agent_runtime_sockets(&mut self, agent_policy: AgentPolicy) -> Result<()> {
+        for socket in Self::agent_runtime_sockets(agent_policy)? {
             self.add_runtime_socket(&socket)?;
         }
         Ok(())
@@ -672,30 +692,85 @@ impl<'a> BubblewrapArgBuilder<'a> {
         absolute.canonicalize().ok()
     }
 
-    fn agent_runtime_sockets() -> Result<BTreeSet<PathBuf>> {
+    fn agent_runtime_sockets(agent_policy: AgentPolicy) -> Result<BTreeSet<PathBuf>> {
         let mut sockets = BTreeSet::new();
-        for key in ["SSH_AUTH_SOCK", "AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
-            if let Some(path) = env_socket_path(env::var_os(key).as_deref())? {
-                sockets.insert(path);
-            }
-        }
-        if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref())? {
+        if agent_policy.ssh_agent()
+            && let Some(path) = env_socket_path(env::var_os("SSH_AUTH_SOCK").as_deref())?
+        {
             sockets.insert(path);
         }
-        if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-            for name in [
-                "S.gpg-agent",
-                "S.gpg-agent.extra",
-                "S.gpg-agent.ssh",
-                "S.gpg-agent.browser",
-            ] {
-                let path = runtime_dir.join("gnupg").join(name);
-                if optional_path_exists(&path)? {
+        if agent_policy.age_agent() {
+            for key in ["AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
+                if let Some(path) = env_socket_path(env::var_os(key).as_deref())? {
                     sockets.insert(path);
                 }
             }
         }
+        if agent_policy.gpg_agent() {
+            if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref())? {
+                sockets.insert(path);
+            }
+            if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+                Self::insert_existing_gpg_socket_names(&mut sockets, &runtime_dir.join("gnupg"))?;
+            }
+            Self::insert_gpgconf_runtime_sockets(&mut sockets)?;
+        }
         Ok(sockets)
+    }
+
+    fn insert_existing_gpg_socket_names(
+        sockets: &mut BTreeSet<PathBuf>,
+        socket_dir: &Path,
+    ) -> Result<()> {
+        for name in GPG_RUNTIME_SOCKET_NAMES {
+            let path = socket_dir.join(name);
+            if optional_path_exists(&path)? {
+                sockets.insert(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_gpgconf_runtime_sockets(sockets: &mut BTreeSet<PathBuf>) -> Result<()> {
+        let output = match Command::new("gpgconf").arg("--list-dirs").output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::sandbox_misconfiguration(format!(
+                    "failed to run gpgconf --list-dirs: {error}"
+                )));
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::sandbox_misconfiguration(format!(
+                "gpgconf --list-dirs failed: {stderr}"
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Self::insert_gpgconf_runtime_sockets_from_list_dirs(sockets, &stdout)
+    }
+
+    fn insert_gpgconf_runtime_sockets_from_list_dirs(
+        sockets: &mut BTreeSet<PathBuf>,
+        list_dirs: &str,
+    ) -> Result<()> {
+        for line in list_dirs.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            if key == "socketdir" {
+                let socket_dir = PathBuf::from(value);
+                if socket_dir.is_absolute() {
+                    Self::insert_existing_gpg_socket_names(sockets, &socket_dir)?;
+                }
+            } else if GPGCONF_SOCKET_KEYS.contains(&key)
+                && let Some(path) = env_socket_path(Some(OsStr::new(value)))?
+            {
+                sockets.insert(path);
+            }
+        }
+        Ok(())
     }
 
     fn add_destination_parent_dirs(&mut self, destination: &Path) {
@@ -881,6 +956,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
@@ -899,6 +975,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
@@ -917,6 +994,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
@@ -935,6 +1013,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_launcher(
@@ -967,6 +1046,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_launcher(
@@ -1022,6 +1102,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Disabled,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
@@ -1066,6 +1147,61 @@ mod tests {
     }
 
     #[test]
+    fn default_agent_policy_mounts_no_agent_sockets() {
+        let sockets = BubblewrapArgBuilder::agent_runtime_sockets(AgentPolicy::default())
+            .expect("default agent discovery succeeds");
+
+        assert!(sockets.is_empty());
+    }
+
+    #[test]
+    fn gpgconf_list_dirs_discovers_keyboxd_and_dirmngr_sockets() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-gpgconf-sockets-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let socket_dir = root.join("gnupg");
+        std::fs::create_dir_all(&socket_dir).expect("socket dir created");
+        for name in ["S.gpg-agent", "S.keyboxd", "S.dirmngr"] {
+            std::fs::write(socket_dir.join(name), "placeholder")
+                .expect("socket placeholder written");
+        }
+        let browser_socket = socket_dir.join("S.gpg-agent.browser");
+        std::fs::write(&browser_socket, "placeholder").expect("browser socket placeholder written");
+        let list_dirs = format!(
+            "socketdir:{}\nagent-browser-socket:{}\nkeyboxd-socket:{}\ndirmngr-socket:{}\n",
+            socket_dir.display(),
+            browser_socket.display(),
+            socket_dir.join("S.keyboxd").display(),
+            socket_dir.join("S.dirmngr").display()
+        );
+        let mut sockets = BTreeSet::new();
+
+        BubblewrapArgBuilder::insert_gpgconf_runtime_sockets_from_list_dirs(
+            &mut sockets,
+            &list_dirs,
+        )
+        .expect("gpgconf socket output parses");
+
+        for expected in [
+            socket_dir.join("S.gpg-agent"),
+            socket_dir.join("S.keyboxd"),
+            socket_dir.join("S.dirmngr"),
+            browser_socket,
+        ] {
+            assert!(
+                sockets.contains(&expected),
+                "missing socket {}",
+                expected.display()
+            );
+        }
+        std::fs::remove_dir_all(root).expect("test dir removed");
+    }
+
+    #[test]
     fn missing_required_bubblewrap_path_fails_planning() {
         let cwd = std::env::current_dir().expect("cwd exists");
         let missing_bwrap = std::env::temp_dir().join(format!(
@@ -1082,6 +1218,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Disabled,
+            agent_policy: AgentPolicy::default(),
         };
 
         let result = request.into_plan_with_bwrap(empty_materialized_policy(), missing_bwrap);
@@ -1153,6 +1290,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(empty_materialized_policy(), existing_bwrap_path())
@@ -1230,6 +1368,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &policy,
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(
@@ -1287,6 +1426,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &policy,
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(
@@ -1360,6 +1500,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &policy,
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(materialized, existing_bwrap_path())
@@ -1425,6 +1566,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &policy,
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(materialized, existing_bwrap_path())
@@ -1475,6 +1617,7 @@ mod tests {
             stdio_policy: "inherit",
             filesystem_policy: &policy,
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         };
         let plan = request
             .into_plan_with_bwrap(materialized, existing_bwrap_path())

@@ -144,7 +144,7 @@ mod tests {
     use std::path::PathBuf;
 
     use clap::Parser;
-    use heimdall_core::{EnvPolicy, ProcMode, StdioPolicy};
+    use heimdall_core::{AgentPolicy, EnvPolicy, ProcMode, StdioPolicy};
 
     use super::*;
     use crate::policy::*;
@@ -334,6 +334,25 @@ mod tests {
     }
 
     #[test]
+    fn policy_document_accepts_agent_socket_opt_ins() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "gpgAgent": true,
+              "sshAgent": true,
+              "ageAgent": false,
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("agent policy converts");
+
+        assert_eq!(request.agent_policy(), AgentPolicy::new(true, true, false));
+        assert!(request.needs_isolation());
+    }
+
+    #[test]
     fn policy_document_accepts_network_isolation() {
         let policy = serde_json::from_str::<PolicyDocument>(
             r#"{
@@ -426,6 +445,9 @@ mod tests {
                 .any(|field| field.as_str() == Some("command"))
         }));
         assert!(schema["properties"].get("filesystem").is_some());
+        assert!(schema["properties"].get("gpgAgent").is_some());
+        assert!(schema["properties"].get("sshAgent").is_some());
+        assert!(schema["properties"].get("ageAgent").is_some());
         assert_eq!(
             schema["$defs"]["PolicyFilesystem"]["additionalProperties"],
             false

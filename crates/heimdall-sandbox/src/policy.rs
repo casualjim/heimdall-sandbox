@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
-use heimdall_core::{EnvPolicy, ExecRequest, FilesystemPolicy, NetworkMode, ProcMode, StdioPolicy};
+use heimdall_core::{
+    AgentPolicy, EnvPolicy, ExecRequest, FilesystemPolicy, NetworkMode, ProcMode, StdioPolicy,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -69,6 +71,15 @@ pub struct SandboxConfig {
     pub(crate) filesystem: Option<PolicyFilesystem>,
     /// Environment variable filtering rules.
     pub(crate) env: Option<PolicyEnvironment>,
+    /// Mount `SSH_AUTH_SOCK` when Linux isolation is used.
+    #[serde(rename = "sshAgent")]
+    pub(crate) ssh_agent: Option<bool>,
+    /// Mount GnuPG agent, keyboxd, and dirmngr sockets when Linux isolation is used.
+    #[serde(rename = "gpgAgent")]
+    pub(crate) gpg_agent: Option<bool>,
+    /// Mount age-compatible agent sockets when Linux isolation is used.
+    #[serde(rename = "ageAgent")]
+    pub(crate) age_agent: Option<bool>,
 }
 
 /// Network isolation mode in a [`PolicyDocument`].
@@ -144,7 +155,17 @@ pub fn reject_unknown_policy_fields(value: &serde_json::Value) -> Result<()> {
     for key in object.keys() {
         if !matches!(
             key.as_str(),
-            "cwd" | "command" | "enabled" | "network" | "proc" | "filesystem" | "env" | "stdio"
+            "cwd"
+                | "command"
+                | "enabled"
+                | "network"
+                | "proc"
+                | "filesystem"
+                | "env"
+                | "stdio"
+                | "sshAgent"
+                | "gpgAgent"
+                | "ageAgent"
         ) {
             return Err(Error::policy(format!("unknown policy field: {key}")));
         }
@@ -160,7 +181,8 @@ pub fn policy_document_request(policy: PolicyDocument) -> Result<ExecRequest> {
         sandbox,
         stdio,
     } = policy;
-    let (network_mode, proc_mode, filesystem_policy) = validate_sandbox_config(&sandbox)?;
+    let (network_mode, proc_mode, filesystem_policy, agent_policy) =
+        validate_sandbox_config(&sandbox)?;
 
     let env = sandbox.env.unwrap_or(PolicyEnvironment {
         allow: None,
@@ -182,6 +204,7 @@ pub fn policy_document_request(policy: PolicyDocument) -> Result<ExecRequest> {
                 .with_stdio_policy(stdio.unwrap_or(CliStdioPolicy::Inherit).into())
                 .with_network_mode(network_mode)
                 .with_proc_mode(proc_mode)
+                .with_agent_policy(agent_policy)
         })
         .and_then(|request| request.with_filesystem_policy(filesystem_policy))
         .map_err(|error| Error::policy(error.to_string()))
@@ -209,7 +232,7 @@ pub fn current_directory() -> Result<PathBuf> {
 
 pub(crate) fn validate_sandbox_config(
     config: &SandboxConfig,
-) -> Result<(NetworkMode, ProcMode, FilesystemPolicy)> {
+) -> Result<(NetworkMode, ProcMode, FilesystemPolicy, AgentPolicy)> {
     if config.enabled == Some(false) {
         return Err(Error::arguments(
             "policy enabled=false is not supported by heimdall-sandbox exec",
@@ -225,8 +248,13 @@ pub(crate) fn validate_sandbox_config(
         Some(SandboxProc::Default) | None => ProcMode::Default,
     };
     let filesystem_policy = filesystem_policy(config.filesystem.as_ref())?;
+    let agent_policy = AgentPolicy::new(
+        config.ssh_agent.unwrap_or(false),
+        config.gpg_agent.unwrap_or(false),
+        config.age_agent.unwrap_or(false),
+    );
 
-    Ok((network_mode, proc_mode, filesystem_policy))
+    Ok((network_mode, proc_mode, filesystem_policy, agent_policy))
 }
 
 pub(crate) fn filesystem_policy(filesystem: Option<&PolicyFilesystem>) -> Result<FilesystemPolicy> {

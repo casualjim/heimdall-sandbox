@@ -1,6 +1,9 @@
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
+
+use heimdall_sandbox_policy::AgentPolicy;
 
 use crate::child::ChildGuard;
 use crate::environment::{build_child_environment, strip_dangerous_environment};
@@ -91,7 +94,9 @@ impl Executor {
             request.denied_env(),
             request.env_policy() == EnvPolicy::Blocklist,
         );
-        strip_dangerous_environment(child_environment)
+        let mut child_environment = strip_dangerous_environment(child_environment);
+        append_agent_environment(&mut child_environment, request.agent_policy());
+        child_environment
     }
 
     fn execute_command(&self, command: Command, stdio_policy: StdioPolicy) -> Result<i32> {
@@ -139,6 +144,7 @@ impl Executor {
             },
             filesystem_policy: request.filesystem_policy(),
             proc_mode: request.proc_mode(),
+            agent_policy: request.agent_policy(),
         }
         .into_plan()?;
         let mut command = plan.command();
@@ -213,6 +219,37 @@ impl Executor {
                     .stderr(Stdio::piped());
             }
         }
+    }
+}
+
+fn append_agent_environment(
+    environment: &mut Vec<(OsString, OsString)>,
+    agent_policy: AgentPolicy,
+) {
+    if agent_policy.ssh_agent() {
+        append_parent_environment(environment, "SSH_AUTH_SOCK");
+    }
+    if agent_policy.gpg_agent() {
+        append_parent_environment(environment, "GPG_AGENT_INFO");
+    }
+    if agent_policy.age_agent() {
+        append_parent_environment(environment, "AGE_AUTH_SOCK");
+        append_parent_environment(environment, "GOPASS_AGE_AGENT_SOCK");
+    }
+}
+
+fn append_parent_environment(environment: &mut Vec<(OsString, OsString)>, key: &str) {
+    let Some(value) = std::env::var_os(key) else {
+        return;
+    };
+    let key = OsString::from(key);
+    if let Some((_, existing_value)) = environment
+        .iter_mut()
+        .find(|(existing_key, _)| existing_key == &key)
+    {
+        *existing_value = value;
+    } else {
+        environment.push((key, value));
     }
 }
 

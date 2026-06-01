@@ -145,6 +145,50 @@ impl std::fmt::Display for ProcMode {
     }
 }
 
+/// Host agent socket mount policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentPolicy {
+    ssh_agent: bool,
+    gpg_agent: bool,
+    age_agent: bool,
+}
+
+impl AgentPolicy {
+    /// Create an agent policy from boolean feature toggles.
+    #[must_use]
+    pub const fn new(ssh_agent: bool, gpg_agent: bool, age_agent: bool) -> Self {
+        Self {
+            ssh_agent,
+            gpg_agent,
+            age_agent,
+        }
+    }
+
+    /// Return true when no host agent sockets are enabled.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        !self.ssh_agent && !self.gpg_agent && !self.age_agent
+    }
+
+    /// Whether `SSH_AUTH_SOCK` should be mounted.
+    #[must_use]
+    pub const fn ssh_agent(&self) -> bool {
+        self.ssh_agent
+    }
+
+    /// Whether GnuPG agent, keyboxd, and dirmngr sockets should be mounted.
+    #[must_use]
+    pub const fn gpg_agent(&self) -> bool {
+        self.gpg_agent
+    }
+
+    /// Whether age-compatible agent sockets should be mounted.
+    #[must_use]
+    pub const fn age_agent(&self) -> bool {
+        self.age_agent
+    }
+}
+
 /// Filesystem sandbox policy expressed as cwd-relative gitignore-style pattern lists.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesystemPolicy {
