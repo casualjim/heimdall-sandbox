@@ -17,6 +17,7 @@ shellcheck = "latest"
 sops = "latest"
 taplo = "latest"
 "ubi:orhun/git-cliff" = "latest"
+"aqua:superradcompany/microsandbox" = "latest"
 
 
 [env]

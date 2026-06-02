@@ -71,13 +71,13 @@ pub struct SandboxConfig {
     pub(crate) filesystem: Option<PolicyFilesystem>,
     /// Environment variable filtering rules.
     pub(crate) env: Option<PolicyEnvironment>,
-    /// Mount `SSH_AUTH_SOCK` when Linux isolation is used.
+    /// Allow `SSH_AUTH_SOCK` when OS isolation is used.
     #[serde(rename = "sshAgent")]
     pub(crate) ssh_agent: Option<bool>,
-    /// Mount GnuPG agent, keyboxd, and dirmngr sockets when Linux isolation is used.
+    /// Allow GnuPG agent, keyboxd, and dirmngr sockets when OS isolation is used.
     #[serde(rename = "gpgAgent")]
     pub(crate) gpg_agent: Option<bool>,
-    /// Mount age-compatible agent sockets when Linux isolation is used.
+    /// Allow age-compatible agent sockets when OS isolation is used.
     #[serde(rename = "ageAgent")]
     pub(crate) age_agent: Option<bool>,
 }

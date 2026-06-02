@@ -179,7 +179,8 @@ impl ExecRequest {
 
     /// Whether this request needs OS-level isolation.
     ///
-    /// Returns `true` when network isolation is requested or filesystem policy is non-empty.
+    /// Returns `true` when network isolation, filesystem controls, or host agent socket access is
+    /// requested.
     #[must_use]
     pub fn needs_isolation(&self) -> bool {
         self.network_mode == NetworkMode::None

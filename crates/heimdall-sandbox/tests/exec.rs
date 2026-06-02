@@ -801,6 +801,61 @@ fn bubblewrap_missing_concrete_policy_and_optional_support_paths_do_not_block_st
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_unix_socket(path: &std::path::Path) -> std::os::unix::net::UnixListener {
+    std::os::unix::net::UnixListener::bind(path).expect("agent socket is bound")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn isolated_policy_agent_opt_ins_expose_existing_agent_sockets() {
+    if !sandbox_backend_available() {
+        return;
+    }
+    let home = unique_home_dir("agent-opt-in");
+    let ssh_socket = home.join("ssh-agent.sock");
+    let gpg_socket = home.join("gpg-agent.sock");
+    let age_socket = home.join("age-agent.sock");
+    let gopass_socket = home.join("gopass-age-agent.sock");
+    let ssh_listener = create_unix_socket(&ssh_socket);
+    let gpg_listener = create_unix_socket(&gpg_socket);
+    let age_listener = create_unix_socket(&age_socket);
+    let gopass_listener = create_unix_socket(&gopass_socket);
+    let policy = serde_json::json!({
+        "cwd": home,
+        "command": [
+            "sh",
+            "-c",
+            "test -S \"$SSH_AUTH_SOCK\" && printf ssh; printf :; gpg=${GPG_AGENT_INFO%%:*}; test -S \"$gpg\" && printf gpg; printf :; test -S \"$AGE_AUTH_SOCK\" && printf age; printf :; test -S \"$GOPASS_AGE_AGENT_SOCK\" && printf gopass",
+        ],
+        "sshAgent": true,
+        "gpgAgent": true,
+        "ageAgent": true,
+        "stdio": "piped",
+    })
+    .to_string();
+    let mut command = sandbox();
+    command
+        .env("SSH_AUTH_SOCK", &ssh_socket)
+        .env("GPG_AGENT_INFO", format!("{}:0:1", gpg_socket.display()))
+        .env("AGE_AUTH_SOCK", &age_socket)
+        .env("GOPASS_AGE_AGENT_SOCK", &gopass_socket);
+
+    let output = run_policy_command(&policy, command);
+    drop((ssh_listener, gpg_listener, age_listener, gopass_listener));
+    std::fs::remove_dir_all(home).expect("home dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ssh:gpg:age:gopass"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn home_policy(
     home: &std::path::Path,
     command: &str,

@@ -1,4 +1,15 @@
 {
+  "sandbox": {
+    "filesystem": {
+      "deny": [
+        "!~/.config/hcloud",
+        "!~/.config/packer"
+      ],
+      "writable": [
+        "~/.config/packer"
+      ]
+    }
+  },
   "commandPolicies": [
     {
       "name": "no-cargo-check",

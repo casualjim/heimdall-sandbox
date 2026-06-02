@@ -192,6 +192,7 @@ impl Executor {
             network_mode: request.network_mode(),
             filesystem_policy: request.filesystem_policy(),
             proc_mode: request.proc_mode(),
+            agent_policy: request.agent_policy(),
         }
         .into_plan()?;
         let mut command = plan.command();

@@ -1,13 +1,14 @@
 //! macOS Seatbelt sandbox planning.
 
 use std::collections::BTreeSet;
+use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use heimdall_sandbox_policy::{
-    FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy, NetworkMode,
-    ProcMode,
+    AgentPolicy, ConcretePathState, FilesystemPolicy, FilesystemPolicyMaterializer,
+    MaterializedFilesystemPolicy, NetworkMode, ProcMode, concrete_path_state,
 };
 use thiserror::Error as ThisError;
 
@@ -19,6 +20,24 @@ const BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
 const PLATFORM_DEFAULTS: &str = include_str!("restricted_read_only_platform_defaults.sbpl");
 
 const NETWORK_SUPPORT_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
+
+const GPG_RUNTIME_SOCKET_NAMES: &[&str] = &[
+    "S.gpg-agent",
+    "S.gpg-agent.extra",
+    "S.gpg-agent.ssh",
+    "S.gpg-agent.browser",
+    "S.keyboxd",
+    "S.dirmngr",
+];
+
+const GPGCONF_SOCKET_KEYS: &[&str] = &[
+    "agent-socket",
+    "agent-ssh-socket",
+    "agent-extra-socket",
+    "agent-browser-socket",
+    "keyboxd-socket",
+    "dirmngr-socket",
+];
 
 /// Result type for macOS sandbox operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -35,6 +54,12 @@ pub enum Error {
         /// Description of the missing directory.
         message: String,
     },
+    /// Agent socket discovery failed.
+    #[error("failed to discover agent runtime paths: {message}")]
+    AgentDiscovery {
+        /// Discovery failure details.
+        message: String,
+    },
 }
 
 /// Structured input used to build a macOS Seatbelt invocation.
@@ -49,6 +74,14 @@ pub struct SeatbeltRequest<'a> {
     pub filesystem_policy: &'a FilesystemPolicy,
     /// Proc mount policy accepted for shared config compatibility.
     pub proc_mode: ProcMode,
+    /// Host agent sockets explicitly enabled for access.
+    pub agent_policy: AgentPolicy,
+}
+
+#[derive(Debug, Default)]
+struct AgentRuntimePaths {
+    sockets: BTreeSet<PathBuf>,
+    readable_dirs: BTreeSet<PathBuf>,
 }
 
 impl SeatbeltRequest<'_> {
@@ -69,6 +102,21 @@ impl SeatbeltRequest<'_> {
     ) -> Result<SeatbeltPlan> {
         let builder = SeatbeltPolicyBuilder::new(&self, materialized);
         let policy = builder.build()?;
+        self.into_plan_with_policy(policy)
+    }
+
+    #[cfg(test)]
+    fn into_plan_with_materialized_and_agent_runtime_paths(
+        self,
+        materialized: MaterializedFilesystemPolicy,
+        agent_runtime_paths: AgentRuntimePaths,
+    ) -> Result<SeatbeltPlan> {
+        let builder = SeatbeltPolicyBuilder::new(&self, materialized);
+        let policy = builder.build_with_agent_runtime_paths(&agent_runtime_paths)?;
+        self.into_plan_with_policy(policy)
+    }
+
+    fn into_plan_with_policy(self, policy: SeatbeltPolicy) -> Result<SeatbeltPlan> {
         let mut args = Vec::with_capacity(4 + policy.params.len() + self.argv.len());
         args.push("-p".to_string());
         args.push(policy.text);
@@ -161,21 +209,30 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         }
     }
 
-    fn build(mut self) -> Result<SeatbeltPolicy> {
+    fn build(self) -> Result<SeatbeltPolicy> {
+        let agent_runtime_paths = Self::agent_runtime_paths(self.request.agent_policy)?;
+        self.build_with_agent_runtime_paths(&agent_runtime_paths)
+    }
+
+    fn build_with_agent_runtime_paths(
+        mut self,
+        agent_runtime_paths: &AgentRuntimePaths,
+    ) -> Result<SeatbeltPolicy> {
         let mut text = String::new();
         text.push_str(BASE_POLICY);
         text.push('\n');
         text.push_str(PLATFORM_DEFAULTS);
         text.push('\n');
         let heimdall_wildcard = self.heimdall_wildcard_write_deny_policy();
-        let write_exclusions = self.write_exclusions();
-        let deny_exclusions = self.deny_exclusions();
-        text.push_str(&self.read_policy()?);
+        let write_exclusions = self.write_exclusions(agent_runtime_paths);
+        let deny_exclusions = self.deny_exclusions(agent_runtime_paths);
+        text.push_str(&self.read_policy(agent_runtime_paths)?);
         text.push_str(&self.write_policy(&write_exclusions));
         text.push_str(&self.platform_writable_policy()?);
-        text.push_str(&self.deny_policy(&deny_exclusions));
+        text.push_str(&self.deny_policy(&deny_exclusions, agent_runtime_paths));
         text.push_str(&self.virtual_write_deny_policy());
         text.push_str(&heimdall_wildcard);
+        text.push_str(&self.agent_socket_policy(agent_runtime_paths));
         text.push_str(&self.network_policy()?);
         Ok(SeatbeltPolicy {
             text,
@@ -183,7 +240,7 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         })
     }
 
-    fn read_policy(&mut self) -> Result<String> {
+    fn read_policy(&mut self, agent_runtime_paths: &AgentRuntimePaths) -> Result<String> {
         let mut policy = String::from("; allow read-only file operations\n");
         self.push_readable_root_policy(&mut policy, "READABLE_ROOT", self.request.cwd);
         for root in Self::platform_read_roots()? {
@@ -192,6 +249,9 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         let readable_targets = std::mem::take(&mut self.targets.readable_targets);
         for readable in readable_targets {
             self.push_readable_root_policy(&mut policy, "READABLE_TARGET", &readable);
+        }
+        for readable in &agent_runtime_paths.readable_dirs {
+            self.push_readable_root_policy(&mut policy, "AGENT_READABLE", readable);
         }
         if let Some(home) = self.home_dir.clone() {
             self.push_readable_root_policy(&mut policy, "HOME_DIR", &home);
@@ -284,7 +344,7 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         rules
     }
 
-    fn write_exclusions(&self) -> BTreeSet<PathBuf> {
+    fn write_exclusions(&self, agent_runtime_paths: &AgentRuntimePaths) -> BTreeSet<PathBuf> {
         let mut exclusions = BTreeSet::new();
         for denied in &self.targets.deny_targets {
             exclusions.extend(path_aliases(denied));
@@ -298,18 +358,23 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         for path in self.request.filesystem_policy.virtual_files().keys() {
             exclusions.extend(path_aliases(path));
         }
+        Self::extend_agent_path_aliases(&mut exclusions, agent_runtime_paths);
         exclusions
     }
 
-    fn deny_policy(&mut self, exclusions: &BTreeSet<PathBuf>) -> String {
+    fn deny_policy(
+        &mut self,
+        exclusions: &BTreeSet<PathBuf>,
+        agent_runtime_paths: &AgentRuntimePaths,
+    ) -> String {
         let mut rules = String::new();
         let deny_targets = std::mem::take(&mut self.targets.deny_targets);
         for denied in deny_targets {
-            self.push_deny_policy(&mut rules, &denied, exclusions, false);
+            self.push_deny_policy(&mut rules, &denied, exclusions, agent_runtime_paths, false);
         }
         let missing_deny_guards = std::mem::take(&mut self.targets.missing_deny_guards);
         for guard in missing_deny_guards {
-            self.push_deny_policy(&mut rules, &guard, exclusions, true);
+            self.push_deny_policy(&mut rules, &guard, exclusions, agent_runtime_paths, true);
         }
         let protected_targets = std::mem::take(&mut self.targets.protected_targets);
         for protected in protected_targets {
@@ -331,9 +396,13 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         rules: &mut String,
         denied: &Path,
         exclusions: &BTreeSet<PathBuf>,
+        agent_runtime_paths: &AgentRuntimePaths,
         force_subpath_deny: bool,
     ) {
         for alias in path_aliases(denied) {
+            if Self::agent_override_covers_path(&alias, agent_runtime_paths) {
+                continue;
+            }
             let param = self.path_param("DENY", &alias);
             rules.push_str(&format!(
                 "(deny file-read* (literal (param \"{param}\")))\n"
@@ -366,7 +435,7 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         }
     }
 
-    fn deny_exclusions(&self) -> BTreeSet<PathBuf> {
+    fn deny_exclusions(&self, agent_runtime_paths: &AgentRuntimePaths) -> BTreeSet<PathBuf> {
         let mut exclusions = BTreeSet::new();
         for writable in &self.targets.writable_targets {
             exclusions.extend(path_aliases(writable));
@@ -374,7 +443,33 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         for readable in &self.targets.readable_targets {
             exclusions.extend(path_aliases(readable));
         }
+        Self::extend_agent_path_aliases(&mut exclusions, agent_runtime_paths);
         exclusions
+    }
+
+    fn extend_agent_path_aliases(
+        exclusions: &mut BTreeSet<PathBuf>,
+        agent_runtime_paths: &AgentRuntimePaths,
+    ) {
+        for readable in &agent_runtime_paths.readable_dirs {
+            exclusions.extend(path_aliases(readable));
+        }
+        for socket in &agent_runtime_paths.sockets {
+            exclusions.extend(path_aliases(socket));
+        }
+    }
+
+    fn agent_override_covers_path(path: &Path, agent_runtime_paths: &AgentRuntimePaths) -> bool {
+        agent_runtime_paths
+            .sockets
+            .iter()
+            .flat_map(|socket| path_aliases(socket).into_iter())
+            .any(|socket| socket == path)
+            || agent_runtime_paths
+                .readable_dirs
+                .iter()
+                .flat_map(|readable| path_aliases(readable).into_iter())
+                .any(|readable| path_has_prefix(path, &readable))
     }
 
     fn virtual_write_deny_policy(&mut self) -> String {
@@ -451,6 +546,125 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         Ok(policy)
     }
 
+    fn agent_socket_policy(&mut self, agent_runtime_paths: &AgentRuntimePaths) -> String {
+        let mut policy = String::new();
+        for socket in &agent_runtime_paths.sockets {
+            for socket_alias in path_aliases(socket) {
+                let socket_param = self.path_param("AGENT_SOCKET", &socket_alias);
+                policy.push_str(&format!(
+                    "; agent socket access\n\
+                     (allow network-outbound (literal (param \"{socket_param}\")))\n\
+                     (allow file-read* file-write* file-ioctl file-test-existence \
+                     (literal (param \"{socket_param}\")))\n"
+                ));
+                if let Some(parent) = socket_alias.parent() {
+                    let parent_param = self.path_param("AGENT_SOCKET_PARENT", parent);
+                    policy.push_str(&format!(
+                        "(allow file-read-metadata file-test-existence \
+                         (literal (param \"{parent_param}\")))\n\
+                         (allow file-read-metadata file-test-existence \
+                         (subpath (param \"{parent_param}\")))\n"
+                    ));
+                }
+            }
+        }
+        policy
+    }
+
+    fn agent_runtime_paths(agent_policy: AgentPolicy) -> Result<AgentRuntimePaths> {
+        let mut paths = AgentRuntimePaths::default();
+        if agent_policy.ssh_agent()
+            && let Some(path) = env_socket_path(env::var_os("SSH_AUTH_SOCK").as_deref())?
+        {
+            paths.sockets.insert(path);
+        }
+        if agent_policy.age_agent() {
+            for key in ["AGE_AUTH_SOCK", "GOPASS_AGE_AGENT_SOCK"] {
+                if let Some(path) = env_socket_path(env::var_os(key).as_deref())? {
+                    paths.sockets.insert(path);
+                }
+            }
+        }
+        if agent_policy.gpg_agent() {
+            if let Some(path) = gpg_agent_info_socket(env::var_os("GPG_AGENT_INFO").as_deref())? {
+                paths.sockets.insert(path);
+            }
+            if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+                Self::insert_existing_gpg_socket_names(&mut paths, &runtime_dir.join("gnupg"))?;
+            }
+            Self::insert_gpgconf_runtime_paths(&mut paths)?;
+        }
+        Ok(paths)
+    }
+
+    fn insert_existing_gpg_socket_names(
+        paths: &mut AgentRuntimePaths,
+        socket_dir: &Path,
+    ) -> Result<()> {
+        Self::insert_existing_agent_readable_dir(paths, socket_dir)?;
+        for name in GPG_RUNTIME_SOCKET_NAMES {
+            let path = socket_dir.join(name);
+            if optional_path_exists(&path)? {
+                paths.sockets.insert(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_existing_agent_readable_dir(
+        paths: &mut AgentRuntimePaths,
+        directory: &Path,
+    ) -> Result<()> {
+        if directory.is_absolute() && optional_path_exists(directory)? && directory.is_dir() {
+            paths.readable_dirs.insert(directory.to_path_buf());
+        }
+        Ok(())
+    }
+
+    fn insert_gpgconf_runtime_paths(paths: &mut AgentRuntimePaths) -> Result<()> {
+        let output = match Command::new("gpgconf").arg("--list-dirs").output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::AgentDiscovery {
+                    message: format!("failed to run gpgconf --list-dirs: {error}"),
+                });
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::AgentDiscovery {
+                message: format!("gpgconf --list-dirs failed: {stderr}"),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Self::insert_gpgconf_runtime_paths_from_list_dirs(paths, &stdout)
+    }
+
+    fn insert_gpgconf_runtime_paths_from_list_dirs(
+        paths: &mut AgentRuntimePaths,
+        list_dirs: &str,
+    ) -> Result<()> {
+        for line in list_dirs.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            if key == "homedir" {
+                Self::insert_existing_agent_readable_dir(paths, &PathBuf::from(value))?;
+            } else if key == "socketdir" {
+                let socket_dir = PathBuf::from(value);
+                if socket_dir.is_absolute() {
+                    Self::insert_existing_gpg_socket_names(paths, &socket_dir)?;
+                }
+            } else if GPGCONF_SOCKET_KEYS.contains(&key)
+                && let Some(path) = env_socket_path(Some(OsStr::new(value)))?
+            {
+                paths.sockets.insert(path);
+            }
+        }
+        Ok(())
+    }
+
     fn network_policy(&mut self) -> Result<String> {
         if self.request.network_mode == NetworkMode::None {
             return Ok(String::new());
@@ -467,6 +681,35 @@ impl<'a> SeatbeltPolicyBuilder<'a> {
         self.params.push((key.clone(), path.to_path_buf()));
         key
     }
+}
+
+fn env_socket_path(value: Option<&OsStr>) -> Result<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if path.is_absolute() && optional_path_exists(&path)? {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
+fn gpg_agent_info_socket(value: Option<&OsStr>) -> Result<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy();
+    let Some(path) = value.split(':').next() else {
+        return Ok(None);
+    };
+    env_socket_path(Some(OsStr::new(path)))
+}
+
+fn optional_path_exists(path: &Path) -> Result<bool> {
+    concrete_path_state(path)
+        .map(|state| matches!(state, ConcretePathState::Existing))
+        .map_err(Into::into)
 }
 
 fn path_matcher(path: &Path, param: &str) -> String {
@@ -590,6 +833,7 @@ mod tests {
             network_mode: NetworkMode::None,
             filesystem_policy,
             proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
         }
     }
 
@@ -606,11 +850,20 @@ mod tests {
     }
 
     fn param_key_for_path<'a>(args: &'a [String], path: &Path) -> &'a str {
+        param_key_for_path_with_prefix(args, path, "DENY")
+    }
+
+    fn param_key_for_path_with_prefix<'a>(
+        args: &'a [String],
+        path: &Path,
+        prefix: &str,
+    ) -> &'a str {
         let suffix = path.to_string_lossy();
+        let expected_prefix = format!("-D{prefix}_");
         let param = args
             .iter()
-            .find(|arg| arg.starts_with("-DDENY_") && arg.ends_with(suffix.as_ref()))
-            .expect("deny param for path exists");
+            .find(|arg| arg.starts_with(&expected_prefix) && arg.ends_with(suffix.as_ref()))
+            .expect("param for path exists");
         param
             .strip_prefix("-D")
             .and_then(|value| value.split_once('=').map(|(key, _)| key))
@@ -741,6 +994,181 @@ mod tests {
         let policy = policy_arg(plan.args());
 
         assert!(!policy.contains("(allow network-outbound)\n(allow network-inbound)"));
+    }
+
+    #[test]
+    fn default_agent_policy_emits_no_agent_socket_rules() {
+        let cwd = std::env::current_dir().expect("cwd exists");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::default();
+        let plan = request(&cwd, &argv, &filesystem_policy)
+            .into_plan_with_materialized(empty_materialized_policy())
+            .expect("plan builds");
+        let policy = policy_arg(plan.args());
+
+        assert!(!policy.contains("AGENT_SOCKET"));
+        assert!(!policy.contains("AGENT_READABLE"));
+    }
+
+    #[test]
+    fn agent_socket_policy_allows_literal_socket_without_general_network() {
+        let root = unique_test_dir("agent-socket");
+        let socket = root.join("agent.sock");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::default();
+        let agent_runtime_paths = AgentRuntimePaths {
+            sockets: BTreeSet::from([socket.clone()]),
+            readable_dirs: BTreeSet::new(),
+        };
+        let request = SeatbeltRequest {
+            agent_policy: AgentPolicy::new(true, false, false),
+            ..request(&root, &argv, &filesystem_policy)
+        };
+        let plan = request
+            .into_plan_with_materialized_and_agent_runtime_paths(
+                empty_materialized_policy(),
+                agent_runtime_paths,
+            )
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+        let policy = policy_arg(plan.args());
+        let socket_param = param_key_for_path_with_prefix(plan.args(), &socket, "AGENT_SOCKET");
+        let parent_param =
+            param_key_for_path_with_prefix(plan.args(), &root, "AGENT_SOCKET_PARENT");
+
+        assert!(!policy.contains("(allow network-outbound)\n(allow network-inbound)"));
+        assert!(policy.contains(&format!(
+            "(allow network-outbound (literal (param \"{socket_param}\")))"
+        )));
+        assert!(policy.contains(&format!(
+            "(allow file-read* file-write* file-ioctl file-test-existence \
+                     (literal (param \"{socket_param}\")))"
+        )));
+        assert!(policy.contains(&format!(
+            "(allow file-read-metadata file-test-existence \
+                         (literal (param \"{parent_param}\")))"
+        )));
+    }
+
+    #[test]
+    fn gpgconf_list_dirs_discovers_keyboxd_and_dirmngr_sockets() {
+        let root = unique_test_dir("gpgconf-sockets");
+        let socket_dir = root.join("gnupg");
+        std::fs::create_dir_all(&socket_dir).expect("socket dir created");
+        for name in ["S.gpg-agent", "S.keyboxd", "S.dirmngr"] {
+            std::fs::write(socket_dir.join(name), "placeholder")
+                .expect("socket placeholder written");
+        }
+        let browser_socket = socket_dir.join("S.gpg-agent.browser");
+        std::fs::write(&browser_socket, "placeholder").expect("browser socket placeholder written");
+        let list_dirs = format!(
+            "homedir:{}\nsocketdir:{}\nagent-browser-socket:{}\nkeyboxd-socket:{}\ndirmngr-socket:{}\n",
+            socket_dir.display(),
+            socket_dir.display(),
+            browser_socket.display(),
+            socket_dir.join("S.keyboxd").display(),
+            socket_dir.join("S.dirmngr").display()
+        );
+        let mut paths = AgentRuntimePaths::default();
+
+        SeatbeltPolicyBuilder::insert_gpgconf_runtime_paths_from_list_dirs(&mut paths, &list_dirs)
+            .expect("gpgconf socket output parses");
+
+        for expected in [
+            socket_dir.join("S.gpg-agent"),
+            socket_dir.join("S.keyboxd"),
+            socket_dir.join("S.dirmngr"),
+            browser_socket,
+        ] {
+            assert!(
+                paths.sockets.contains(&expected),
+                "missing socket {}",
+                expected.display()
+            );
+        }
+        assert!(paths.readable_dirs.contains(&socket_dir));
+        std::fs::remove_dir_all(root).expect("test dir removed");
+    }
+
+    #[test]
+    fn denied_parent_excludes_agent_readable_dir() {
+        let root = unique_test_dir("agent-readable-deny");
+        let agent_dir = root.join(".gnupg");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir created");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![root.to_string_lossy().to_string()],
+            Vec::new(),
+            Default::default(),
+        );
+        let materialized = MaterializedFilesystemPolicy::new(
+            BTreeSet::from([root.clone()]),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+        let agent_runtime_paths = AgentRuntimePaths {
+            sockets: BTreeSet::new(),
+            readable_dirs: BTreeSet::from([agent_dir.clone()]),
+        };
+        let request = SeatbeltRequest {
+            agent_policy: AgentPolicy::new(false, true, false),
+            ..request(&root, &argv, &filesystem_policy)
+        };
+        let plan = request
+            .into_plan_with_materialized_and_agent_runtime_paths(materialized, agent_runtime_paths)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+        let policy = policy_arg(plan.args());
+
+        assert!(
+            plan.args()
+                .iter()
+                .any(|arg| arg.starts_with("-DAGENT_READABLE_")
+                    && arg.ends_with(agent_dir.to_string_lossy().as_ref()))
+        );
+        assert!(policy.contains("DENY_EXCLUDED_"));
+    }
+
+    #[test]
+    fn exact_denied_agent_socket_is_not_rendered_as_seatbelt_deny() {
+        let root = unique_test_dir("agent-exact-deny");
+        let socket = root.join("agent.sock");
+        std::fs::write(&socket, "placeholder").expect("socket placeholder written");
+        let argv = ["true".to_string()];
+        let filesystem_policy = FilesystemPolicy::new(
+            vec![socket.to_string_lossy().to_string()],
+            Vec::new(),
+            Default::default(),
+        );
+        let materialized = MaterializedFilesystemPolicy::new(
+            BTreeSet::from([socket.clone()]),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+        let agent_runtime_paths = AgentRuntimePaths {
+            sockets: BTreeSet::from([socket.clone()]),
+            readable_dirs: BTreeSet::new(),
+        };
+        let request = SeatbeltRequest {
+            agent_policy: AgentPolicy::new(true, false, false),
+            ..request(&root, &argv, &filesystem_policy)
+        };
+        let plan = request
+            .into_plan_with_materialized_and_agent_runtime_paths(materialized, agent_runtime_paths)
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dir removed");
+
+        assert!(
+            plan.args()
+                .iter()
+                .any(|arg| arg.starts_with("-DAGENT_SOCKET_")
+                    && arg.ends_with(socket.to_string_lossy().as_ref()))
+        );
+        assert!(
+            !plan.args().iter().any(|arg| arg.starts_with("-DDENY_")
+                && arg.ends_with(socket.to_string_lossy().as_ref())),
+            "exact agent socket deny must not override opt-in agent access"
+        );
     }
 
     #[test]
