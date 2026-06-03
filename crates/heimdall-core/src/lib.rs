@@ -12,7 +12,7 @@ mod signal;
 pub use error::{Error, SANDBOX_MISCONFIGURATION_EXIT_CODE};
 pub use executor::Executor;
 pub use heimdall_sandbox_policy::{
-    FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
+    AgentPolicy, FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
 };
 pub use request::{EnvPolicy, ExecRequest, StdioPolicy, validate_cwd};
 

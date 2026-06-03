@@ -11,7 +11,8 @@ Configure the repository secret `CARGO_REGISTRY_TOKEN` with permission to publis
 3. `heimdall-linux-sandbox`
 4. `heimdall-macos-sandbox`
 5. `heimdall-core`
-6. `heimdall-sandbox`
+6. `heimdall-privacy-filter`
+7. `heimdall-sandbox`
 
 The workflow passes the token directly to `cargo publish`. Missing, expired, or under-scoped tokens make the publish job fail visibly.
 
@@ -32,6 +33,6 @@ Do not remove `@casualjim/heimdall-sandbox-linux-arm64` only because privacy-fil
 
 ## Local validation
 
-Use `scripts/validate-cargo-packages.sh` to validate package file selection and required Cargo metadata for every publishable crate before a first registry release. Full `cargo publish --dry-run` can only verify dependent Heimdall crates after their internal dependencies already exist in the crates.io index; the release publish script handles first-release ordering and waits for each dependency version to become visible before publishing the next crate.
+Use `scripts/validate-cargo-packages.sh` to validate package file selection and required Cargo metadata for every publishable crate before a first registry release. The validator includes `heimdall-privacy-filter`, because `heimdall-sandbox` depends on it for `setup` and `privacy-filter redact`. Full `cargo publish --dry-run` can only verify dependent Heimdall crates after their internal dependencies already exist in the crates.io index; the release publish script handles first-release ordering and waits for each dependency version to become visible before publishing the next crate.
 
 Use `node scripts/prepare-npm-packages.ts --dry-run-placeholders --pack-dry-run` to validate npm metadata, optional dependency wiring, CLI shim packaging, and platform package file layout without cargo-dist release artifacts. The npm package assembly script uses Node 24's built-in TypeScript support and has no third-party dependencies.

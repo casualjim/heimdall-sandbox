@@ -30,3 +30,7 @@ uv.lock
 research_codex-sandbox-architecture_20260503.md
 fnox.toml
 casualjim-heimdall-sandbox-*.tgz
+.menv/
+release.md
+progress.md
+research.md
