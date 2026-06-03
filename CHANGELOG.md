@@ -1,3 +1,8 @@
+## [0.1.43] - 2026-06-03
+
+### 🚀 Features
+
+- *(sandbox)* Add agent socket opt-ins (#18)
 ## [0.1.42] - 2026-05-24
 
 ### 🐛 Bug Fixes
@@ -7,6 +12,8 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Retry flaky tests
+- Update changelog for v0.1.42 [ci skip]
+- Release version 0.1.42
 ## [0.1.41] - 2026-05-24
 
 ### 🐛 Bug Fixes
