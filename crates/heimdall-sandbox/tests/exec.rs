@@ -801,6 +801,19 @@ fn bubblewrap_missing_concrete_policy_and_optional_support_paths_do_not_block_st
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn unique_socket_dir(name: &str) -> std::path::PathBuf {
+    // Unix socket paths must fit sockaddr_un.sun_path, which is shorter than
+    // project-scoped macOS temp directories.
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after Unix epoch")
+        .as_nanos();
+    let dir = std::path::PathBuf::from(format!("/tmp/hd-{name}-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&dir).expect("socket dir is created");
+    dir
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn create_unix_socket(path: &std::path::Path) -> std::os::unix::net::UnixListener {
     std::os::unix::net::UnixListener::bind(path).expect("agent socket is bound")
 }
@@ -812,10 +825,11 @@ fn isolated_policy_agent_opt_ins_expose_existing_agent_sockets() {
         return;
     }
     let home = unique_home_dir("agent-opt-in");
-    let ssh_socket = home.join("ssh-agent.sock");
-    let gpg_socket = home.join("gpg-agent.sock");
-    let age_socket = home.join("age-agent.sock");
-    let gopass_socket = home.join("gopass-age-agent.sock");
+    let socket_dir = unique_socket_dir("agent");
+    let ssh_socket = socket_dir.join("ssh.sock");
+    let gpg_socket = socket_dir.join("gpg.sock");
+    let age_socket = socket_dir.join("age.sock");
+    let gopass_socket = socket_dir.join("gp.sock");
     let ssh_listener = create_unix_socket(&ssh_socket);
     let gpg_listener = create_unix_socket(&gpg_socket);
     let age_listener = create_unix_socket(&age_socket);
@@ -842,6 +856,7 @@ fn isolated_policy_agent_opt_ins_expose_existing_agent_sockets() {
 
     let output = run_policy_command(&policy, command);
     drop((ssh_listener, gpg_listener, age_listener, gopass_listener));
+    std::fs::remove_dir_all(socket_dir).expect("socket dir is removed");
     std::fs::remove_dir_all(home).expect("home dir is removed");
 
     assert!(
