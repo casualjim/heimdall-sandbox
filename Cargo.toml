@@ -16,7 +16,7 @@ homepage = "https://github.com/casualjim/heimdall-sandbox"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/casualjim/heimdall-sandbox"
-version = "0.1.42"
+version = "0.1.43"
 
 [workspace.metadata.release]
 allow-branch = ["main"]
@@ -29,12 +29,12 @@ tag-message = "chore: release version {{version}}"
 [workspace.dependencies]
 clap = { version = "4.5.51", features = ["derive"] }
 dirs = "6"
-heimdall-core = { version = "0.1.42", path = "crates/heimdall-core" }
-heimdall-linux-sandbox = { version = "0.1.42", path = "crates/heimdall-linux-sandbox" }
-heimdall-macos-sandbox = { version = "0.1.42", path = "crates/heimdall-macos-sandbox" }
-heimdall-privacy-filter = { version = "0.1.42", path = "crates/heimdall-privacy-filter" }
-heimdall-process-hardening = { version = "0.1.42", path = "crates/heimdall-process-hardening" }
-heimdall-sandbox-policy = { version = "0.1.42", path = "crates/heimdall-sandbox-policy" }
+heimdall-core = { version = "0.1.43", path = "crates/heimdall-core" }
+heimdall-linux-sandbox = { version = "0.1.43", path = "crates/heimdall-linux-sandbox" }
+heimdall-macos-sandbox = { version = "0.1.43", path = "crates/heimdall-macos-sandbox" }
+heimdall-privacy-filter = { version = "0.1.43", path = "crates/heimdall-privacy-filter" }
+heimdall-process-hardening = { version = "0.1.43", path = "crates/heimdall-process-hardening" }
+heimdall-sandbox-policy = { version = "0.1.43", path = "crates/heimdall-sandbox-policy" }
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rustls-tls"] }
 ignore = "0.4.25"
 libc = "0.2.177"
