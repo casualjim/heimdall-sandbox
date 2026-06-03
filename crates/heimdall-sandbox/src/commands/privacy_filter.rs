@@ -57,6 +57,11 @@ pub struct RedactArgs {
     #[cfg(debug_assertions)]
     #[arg(long = "test-usable-token-limit", hide = true)]
     test_usable_token_limit: Option<usize>,
+
+    /// Use deterministic redaction in debug builds for CLI input plumbing tests.
+    #[cfg(debug_assertions)]
+    #[arg(long = "test-deterministic-redaction", hide = true)]
+    test_deterministic_redaction: bool,
 }
 
 /// Run a privacy-filter subcommand and return a process exit code.
@@ -79,6 +84,12 @@ fn run_redact_command(args: RedactArgs) -> i32 {
             return heimdall_core::SANDBOX_MISCONFIGURATION_EXIT_CODE;
         }
     };
+
+    #[cfg(debug_assertions)]
+    if args.test_deterministic_redaction {
+        println!("{}", redact_email_like_tokens_for_test(&text));
+        return 0;
+    }
 
     let mut config = PrivacyFilterConfig::enabled()
         .with_variant(PrivacyFilterVariant::from(variant))
@@ -121,6 +132,20 @@ fn run_redact_command(args: RedactArgs) -> i32 {
 /// - `Some(arg)` literal text → use as-is
 /// - `None` + stdin is a pipe/redirect → read stdin
 /// - `None` + stdin is a terminal → error
+#[cfg(debug_assertions)]
+fn redact_email_like_tokens_for_test(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            if token.contains('@') {
+                "[REDACTED:EMAIL]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn read_input(input: Option<String>) -> Result<String, String> {
     if let Some(arg) = input {
         let path = PathBuf::from(&arg);

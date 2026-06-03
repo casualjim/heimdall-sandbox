@@ -8,13 +8,15 @@ use heimdall_sandbox_policy::AgentPolicy;
 use crate::child::ChildGuard;
 use crate::environment::{build_child_environment, strip_dangerous_environment};
 use crate::outcome::child_outcome;
-use crate::request::{EnvPolicy, ExecRequest, StdioPolicy};
+use crate::request::{EnvPolicy, ExecRequest, RuntimeMode, StdioPolicy};
 use crate::{Error, Result};
 
 #[cfg(target_os = "linux")]
 use heimdall_linux_sandbox::BubblewrapRequest;
 #[cfg(target_os = "macos")]
 use heimdall_macos_sandbox::SeatbeltRequest;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use heimdall_microvm_sandbox::MicrovmRequest;
 
 /// Executes sandbox requests.
 ///
@@ -39,6 +41,19 @@ impl Executor {
         request: &ExecRequest,
         hardener: impl FnOnce() -> std::io::Result<()> + Send + Sync + 'static,
     ) -> Result<i32> {
+        if request.runtime_mode() == RuntimeMode::Microvm {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                return self.execute_with_microvm(request);
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                return Err(Error::sandbox_misconfiguration(
+                    "microvm runtime is not supported on this platform",
+                ));
+            }
+        }
+
         if request.needs_isolation() {
             #[cfg(target_os = "linux")]
             {
@@ -130,6 +145,25 @@ impl Executor {
         drop(forwarding);
 
         Ok(child_outcome(status).exit_code())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn execute_with_microvm(&self, request: &ExecRequest) -> Result<i32> {
+        let child_environment = self.child_environment(request);
+        MicrovmRequest {
+            cwd: request.cwd(),
+            argv: request.argv(),
+            image: request.microvm_image().ok_or_else(|| {
+                Error::sandbox_misconfiguration("microvm runtime requires non-empty policy image")
+            })?,
+            environment: &child_environment,
+            network_mode: request.network_mode(),
+            filesystem_policy: request.filesystem_policy(),
+            proc_mode: request.proc_mode(),
+            agent_policy: request.agent_policy(),
+        }
+        .execute()
+        .map_err(Error::from)
     }
 
     #[cfg(target_os = "linux")]

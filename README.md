@@ -1,10 +1,10 @@
 # Heimdall
 
-A cross-platform process sandbox runtime written in Rust. Heimdall executes untrusted commands with configurable filesystem, network, and environment isolation — using [bubblewrap](https://github.com/containers/bubblewrap) and Linux namespaces on Linux, and [Seatbelt](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf) on macOS.
+A cross-platform process sandbox runtime written in Rust. Heimdall executes untrusted commands with configurable filesystem, network, and environment isolation — using [bubblewrap](https://github.com/containers/bubblewrap) and Linux namespaces on Linux, [Seatbelt](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf) on macOS, and optional [microsandbox](https://microsandbox.dev/) microVMs when policy requests `runtime: "microvm"`.
 
 ## Features
 
-- **Cross-platform isolation** — bubblewrap on Linux, Seatbelt on macOS
+- **Cross-platform isolation** — bubblewrap on Linux, Seatbelt on macOS, optional microsandbox microVM runtime on Linux KVM and Apple Silicon macOS
 - **Filesystem isolation** — deny patterns, writable overlays, and virtual file injection using gitignore-style globs
 - **Network isolation** — disable host networking inside the sandbox
 - **Environment filtering** — allowlist by default, or blocklist with explicit deny rules
@@ -105,6 +105,24 @@ EOF
 
 The child will fail because the network is unreachable inside the sandbox.
 
+### Use the microVM runtime
+
+Policies can request microsandbox as an explicit runtime:
+
+```sh
+heimdall-sandbox exec --policy - <<'EOF'
+{
+  "runtime": "microvm",
+  "image": "alpine",
+  "command": ["/bin/echo", "hello"]
+}
+EOF
+```
+
+MicroVM execution uses an ephemeral attached sandbox and stops it after the command exits. Heimdall requires microsandbox runtime dependencies (`msb` and `libkrunfw`) to already be installed; `exec` does not download or install the runtime bundle. Phase one supports Linux with KVM and Apple Silicon macOS. Filesystem policies, `proc=none`, and agent socket opt-ins fail closed until strict parity is implemented for those surfaces.
+
+`--runtime microvm` can override a policy runtime, but microVM execution still requires a non-empty policy `image`.
+
 ### Hide files and inject virtual ones
 
 Filesystem policies use gitignore-style glob patterns. This example hides `.env` files, marks `src/` as writable, and injects a virtual `/etc/passwd` file. Linux materialises virtual files as read-only sandbox content. macOS Seatbelt cannot materialise replacement bytes; it enforces read/write policy around existing host paths and prevents writes to virtual targets without mutating the host:
@@ -187,6 +205,8 @@ Integration tests that exercise real isolation require platform backends: `bwrap
 | `command` | `string[]` | **Required.** Command argv to execute. |
 | `cwd` | `string` | Working directory (defaults to current directory). |
 | `stdio` | `"inherit" \| "piped"` | Child I/O handling (default: `inherit`). |
+| `runtime` | `"platform" \| "microvm"` | Runtime backend (default: `platform`, meaning Linux bubblewrap or macOS Seatbelt). |
+| `image` | `string` | Microsandbox root filesystem image/source. Required when effective runtime is `microvm`; rejected with `platform`. |
 | `network` | `"host" \| "none"` | Network mode (default: `host`). |
 | `proc` | `"default" \| "none"` | `/proc` mount policy (default: `default`). |
 | `env.allow` | `string[]` | Environment variable allowlist. |
@@ -201,7 +221,7 @@ Integration tests that exercise real isolation require platform backends: `bwrap
 
 ## How it works
 
-Heimdall is a Cargo workspace with seven crates:
+Heimdall is a Cargo workspace with eight crates:
 
 | Crate | Role |
 |---|---|
@@ -210,13 +230,14 @@ Heimdall is a Cargo workspace with seven crates:
 | `heimdall-sandbox-policy` | Shared policy types and filesystem policy materialization (used by both platform crates). |
 | `heimdall-linux-sandbox` | Linux isolation — bubblewrap planning, namespace configuration. |
 | `heimdall-macos-sandbox` | macOS isolation — Seatbelt policy generation, sandbox-exec invocation. |
+| `heimdall-microvm-sandbox` | MicroVM isolation — microsandbox SDK integration and host preflight. |
 | `heimdall-process-hardening` | Process hardening — ptrace protection, core dump disabling, dangerous environment stripping. |
 | `heimdall-privacy-filter` | Privacy-filter setup, cached ONNX runtime loading, and redaction. |
 
 ## Requirements
 
-- Linux (x86_64, aarch64) — filesystem and network isolation require bubblewrap and user namespaces
-- macOS (Apple Silicon) — filesystem and network isolation use the built-in Seatbelt sandbox
+- Linux (x86_64, aarch64) — platform filesystem and network isolation require bubblewrap and user namespaces; microVM runtime requires Linux KVM plus installed microsandbox `msb`/`libkrunfw`
+- macOS (Apple Silicon) — platform filesystem and network isolation use the built-in Seatbelt sandbox; microVM runtime requires installed microsandbox `msb`/`libkrunfw`
 - Rust 2024 edition (1.85+) for building from source
 
 ## License

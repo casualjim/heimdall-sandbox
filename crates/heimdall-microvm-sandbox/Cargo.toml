@@ -1,0 +1,15 @@
+[package]
+description = "Microsandbox microVM backend for Heimdall sandbox execution."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "heimdall-microvm-sandbox"
+readme.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+heimdall-sandbox-policy.workspace = true
+microsandbox.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

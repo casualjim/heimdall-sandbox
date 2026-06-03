@@ -30,8 +30,9 @@ Heimdall runs untrusted commands cross-platform with policy-driven filesystem/ne
 - cmd: `heimdall-sandbox setup [--force] [--cache-dir PATH] [--variant q4|q4f16|quantized|fp16|full] [--revision REV]`.
 - cmd: `heimdall-sandbox privacy-filter redact [TEXT_OR_FILE] [--cache-dir PATH] [--variant q4|q4f16|quantized|fp16|full] [--revision REV] [--execution-provider cpu|web-gpu]`.
 - cmd: hidden `heimdall-sandbox __heimdall-inner-exec --cwd PATH [--stdio inherit|piped] -- ARGV...` Linux reentry.
-- policy: JSON fields `cwd`, `command`, `runtime`, `enabled`, `network`, `proc`, `filesystem`, `env`, `stdio`, `sshAgent`, `gpgAgent`, `ageAgent`.
+- policy: JSON fields `cwd`, `command`, `runtime`, `image`, `enabled`, `network`, `proc`, `filesystem`, `env`, `stdio`, `sshAgent`, `gpgAgent`, `ageAgent`.
 - policy: `runtime: "platform"|"microvm"`; omitted → `platform`; CLI `--runtime` overrides policy runtime.
+- policy: `image` non-empty string required when effective runtime `microvm`; `platform` + `image` → error.
 - policy: `network: "host"|"none"`; `proc: "default"|"none"`; `stdio: "inherit"|"piped"`.
 - policy: `env.allow`, `env.deny`; CLI allow/deny mutually exclusive, policy allow+deny accepted with deny override.
 - policy: `filesystem.deny`, `filesystem.writable`, `filesystem.virtual` absolute path → content map.
@@ -82,6 +83,7 @@ V37: `microvm` host requires Linux KVM ∨ `aarch64-apple-darwin`; missing host/
 V38: `microvm` exec creates ephemeral attached sandbox, runs argv, preserves exit, calls `stop_and_wait()`
 V39: `microvm` ! preserve V15,V19,V20,V21,V22,V23,V24,V25 semantics; unsupported mapping → error; fallback ⊥
 V40: Heimdall exec ⊥ download/install microsandbox runtime; setup external to exec path
+V41: effective `microvm` runtime requires policy `image`; effective `platform` runtime rejects `image`
 
 ## §T TASKS
 id|status|task|cites
@@ -93,13 +95,13 @@ T14|x|decide/document policy `env.allow` + `env.deny` semantics; code uses deny 
 T15|x|confirm Seatbelt `filesystem.virtual` contract vs README replace-file claim|I.policy,V23
 T16|x|review backend-unavailable early-return integration tests; decide explicit skip policy or infra requirement|V16,V18,V34
 T17|x|document signal forwarding and process-hardening guarantees for operators|V25,V26,I.cmd
-T18|.|add runtime enum/schema + CLI `--runtime`; thread policy/CLI precedence|I.cmd,I.policy,V12,V35
-T19|.|thread runtime through `PolicyDocument` → `ExecRequest` → executor dispatch|I.rust,V35,V36
-T20|.|add `heimdall-microvm-sandbox` backend using microsandbox Rust SDK|I.cargo,V36,V38
-T21|.|add microVM host/dependency preflight for Linux KVM + Apple Silicon macOS|V37,V40
-T22|.|map FS/network/proc/agent policy to microVM strict parity or fail closed|V15,V19,V20,V21,V22,V23,V24,V39
-T23|.|add microVM tests for schema, CLI precedence, dispatch, preflight, no fallback|V12,V34,V35,V37,V39
-T24|.|sync README/SPEC docs for runtime field, CLI flag, microsandbox deps, host matrix|I.cmd,I.policy,V36,V37,V40
+T18|x|add runtime enum/schema + CLI `--runtime`; thread policy/CLI precedence|I.cmd,I.policy,V12,V35,V41
+T19|x|thread runtime through `PolicyDocument` → `ExecRequest` → executor dispatch|I.rust,V35,V36,V41
+T20|x|add `heimdall-microvm-sandbox` backend using microsandbox Rust SDK|I.cargo,V36,V38,V41
+T21|x|add microVM host/dependency preflight for Linux KVM + Apple Silicon macOS|V37,V40
+T22|x|map FS/network/proc/agent policy to microVM strict parity or fail closed|V15,V19,V20,V21,V22,V23,V24,V39,V41
+T23|x|add microVM tests for schema, CLI precedence, dispatch, preflight, no fallback|V12,V34,V35,V37,V39,V41
+T24|x|sync README/SPEC docs for runtime field, CLI flag, microsandbox deps, host matrix|I.cmd,I.policy,V36,V37,V40
 
 ## §B BUGS
 id|date|cause|fix

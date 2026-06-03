@@ -14,7 +14,7 @@ pub use executor::Executor;
 pub use heimdall_sandbox_policy::{
     AgentPolicy, FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
 };
-pub use request::{EnvPolicy, ExecRequest, StdioPolicy, validate_cwd};
+pub use request::{EnvPolicy, ExecRequest, RuntimeMode, StdioPolicy, validate_cwd};
 
 /// Result type for sandbox runtime operations.
 pub type Result<T> = std::result::Result<T, Error>;

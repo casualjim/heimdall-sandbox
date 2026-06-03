@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::policy::CliStdioPolicy;
+use crate::policy::{CliRuntimeMode, CliStdioPolicy};
 
 /// Execute a command in the minimal sandbox runtime.
 #[derive(Debug, Parser)]
@@ -12,6 +12,10 @@ pub struct ExecArgs {
     /// JSON sandbox policy path, or `-` to read the policy from stdin.
     #[arg(long = "policy")]
     pub policy: Option<String>,
+
+    /// Sandbox runtime backend.
+    #[arg(long = "runtime", value_enum)]
+    pub runtime: Option<CliRuntimeMode>,
 
     /// Child process working directory.
     #[arg(long)]

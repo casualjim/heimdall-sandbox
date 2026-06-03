@@ -144,7 +144,7 @@ mod tests {
     use std::path::PathBuf;
 
     use clap::Parser;
-    use heimdall_core::{AgentPolicy, EnvPolicy, ProcMode, StdioPolicy};
+    use heimdall_core::{AgentPolicy, EnvPolicy, ProcMode, RuntimeMode, StdioPolicy};
 
     use super::*;
     use crate::policy::*;
@@ -169,7 +169,30 @@ mod tests {
         assert_eq!(request.cwd(), PathBuf::from("."));
         assert_eq!(request.argv(), ["printf", "hello"]);
         assert_eq!(request.allowed_env(), ["PATH"]);
+        assert_eq!(request.runtime_mode(), RuntimeMode::Platform);
         assert_eq!(request.stdio_policy(), StdioPolicy::Inherit);
+    }
+
+    #[test]
+    fn direct_microvm_runtime_requires_policy_image() {
+        let command = Cli::try_parse_from([
+            "heimdall-sandbox",
+            "exec",
+            "--runtime",
+            "microvm",
+            "--cwd",
+            ".",
+            "--",
+            "printf",
+            "hello",
+        ])
+        .expect("valid invocation parses");
+
+        let error = command
+            .into_exec_request()
+            .expect_err("direct microvm runtime has no image source");
+
+        assert!(error.to_string().contains("requires --policy"));
     }
 
     #[test]
@@ -238,6 +261,8 @@ mod tests {
         let request = policy_document_request(PolicyDocument {
             cwd: Some(PathBuf::from(".")),
             command: vec!["printf".to_string(), "hello".to_string()],
+            runtime: None,
+            image: None,
             sandbox: SandboxConfig {
                 env: Some(PolicyEnvironment {
                     allow: Some(vec!["PATH".to_string(), "SECRET".to_string()]),
@@ -260,6 +285,8 @@ mod tests {
         let request = policy_document_request(PolicyDocument {
             cwd: Some(PathBuf::from(".")),
             command: vec!["printf".to_string(), "hello".to_string()],
+            runtime: None,
+            image: None,
             sandbox: SandboxConfig {
                 env: Some(PolicyEnvironment {
                     allow: None,
@@ -296,6 +323,85 @@ mod tests {
         assert_eq!(request.allowed_env(), ["PATH"]);
         assert!(request.denied_env().is_empty());
         assert_eq!(request.stdio_policy(), StdioPolicy::Piped);
+    }
+
+    #[test]
+    fn policy_document_accepts_microvm_runtime() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("runtime converts");
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Microvm);
+        assert_eq!(request.microvm_image(), Some("alpine"));
+    }
+
+    #[test]
+    fn policy_document_rejects_microvm_runtime_without_image() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request(policy).expect_err("microvm image is required");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires non-empty policy image")
+        );
+    }
+
+    #[test]
+    fn cli_runtime_overrides_policy_runtime() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "platform",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request_with_runtime(policy, Some(CliRuntimeMode::Microvm))
+            .expect("runtime override converts");
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Microvm);
+        assert_eq!(request.microvm_image(), Some("alpine"));
+    }
+
+    #[test]
+    fn cli_platform_override_rejects_policy_image() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request_with_runtime(policy, Some(CliRuntimeMode::Platform))
+            .expect_err("platform runtime rejects image");
+
+        assert!(
+            error
+                .to_string()
+                .contains("policy image requires runtime microvm")
+        );
     }
 
     #[test]
@@ -445,6 +551,8 @@ mod tests {
                 .any(|field| field.as_str() == Some("command"))
         }));
         assert!(schema["properties"].get("filesystem").is_some());
+        assert!(schema["properties"].get("runtime").is_some());
+        assert!(schema["properties"].get("image").is_some());
         assert!(schema["properties"].get("gpgAgent").is_some());
         assert!(schema["properties"].get("sshAgent").is_some());
         assert!(schema["properties"].get("ageAgent").is_some());

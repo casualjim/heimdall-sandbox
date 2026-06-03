@@ -159,6 +159,7 @@ fn redact_reads_long_stdin_without_truncating_tail() {
         .arg("redact")
         .arg("--test-usable-token-limit")
         .arg("32")
+        .arg("--test-deterministic-redaction")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -193,6 +194,7 @@ fn redact_reads_long_file_without_truncating_tail() {
         .arg("redact")
         .arg("--test-usable-token-limit")
         .arg("32")
+        .arg("--test-deterministic-redaction")
         .arg(&path)
         .output()
         .expect("sandbox command runs");
