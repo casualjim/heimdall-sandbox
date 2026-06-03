@@ -39,6 +39,39 @@ impl std::fmt::Display for StdioPolicy {
     }
 }
 
+/// Sandbox runtime selection policy.
+///
+/// Controls whether execution uses the current platform sandbox backend or the
+/// microsandbox microVM backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMode {
+    /// Use the current platform backend (`bwrap` on Linux, Seatbelt on macOS).
+    Platform,
+    /// Use the microsandbox microVM backend.
+    Microvm,
+}
+
+impl std::str::FromStr for RuntimeMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "platform" => Ok(Self::Platform),
+            "microvm" => Ok(Self::Microvm),
+            _ => Err(format!("unknown runtime mode: {s}")),
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Platform => formatter.write_str("platform"),
+            Self::Microvm => formatter.write_str("microvm"),
+        }
+    }
+}
+
 /// Child environment filtering policy.
 ///
 /// Determines which parent environment variables are inherited by the sandboxed
@@ -83,6 +116,8 @@ pub struct ExecRequest {
     allowed_env: Vec<String>,
     denied_env: Vec<String>,
     env_policy: EnvPolicy,
+    runtime_mode: RuntimeMode,
+    microvm_image: Option<String>,
     stdio_policy: StdioPolicy,
     network_mode: NetworkMode,
     filesystem_policy: FilesystemPolicy,
@@ -113,12 +148,28 @@ impl ExecRequest {
             allowed_env,
             denied_env: Vec::new(),
             env_policy: EnvPolicy::Allowlist,
+            runtime_mode: RuntimeMode::Platform,
+            microvm_image: None,
             stdio_policy: StdioPolicy::Inherit,
             network_mode: NetworkMode::Host,
             filesystem_policy: FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
             agent_policy: AgentPolicy::default(),
         })
+    }
+
+    /// Set the sandbox runtime mode.
+    #[must_use]
+    pub const fn with_runtime_mode(mut self, runtime_mode: RuntimeMode) -> Self {
+        self.runtime_mode = runtime_mode;
+        self
+    }
+
+    /// Set the microVM root filesystem image.
+    #[must_use]
+    pub fn with_microvm_image(mut self, image: impl Into<String>) -> Self {
+        self.microvm_image = Some(image.into());
+        self
     }
 
     /// Set the child stdio handling policy.
@@ -218,6 +269,18 @@ impl ExecRequest {
         self.env_policy
     }
 
+    /// Sandbox runtime mode.
+    #[must_use]
+    pub const fn runtime_mode(&self) -> RuntimeMode {
+        self.runtime_mode
+    }
+
+    /// MicroVM root filesystem image, when configured.
+    #[must_use]
+    pub fn microvm_image(&self) -> Option<&str> {
+        self.microvm_image.as_deref()
+    }
+
     /// Child stdio handling policy.
     #[must_use]
     pub const fn stdio_policy(&self) -> StdioPolicy {
@@ -277,7 +340,34 @@ mod tests {
 
         assert_eq!(request.argv(), ["printf", "hello"]);
         assert_eq!(request.allowed_env(), ["PATH"]);
+        assert_eq!(request.runtime_mode(), RuntimeMode::Platform);
         assert_eq!(request.stdio_policy(), StdioPolicy::Inherit);
+    }
+
+    #[test]
+    fn request_accepts_microvm_runtime_mode() {
+        let request = ExecRequest::new(
+            std::env::current_dir().expect("current dir exists"),
+            vec!["printf".into(), "hello".into()],
+            vec!["PATH".into()],
+        )
+        .expect("valid request is accepted")
+        .with_runtime_mode(RuntimeMode::Microvm);
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Microvm);
+    }
+
+    #[test]
+    fn request_accepts_microvm_image() {
+        let request = ExecRequest::new(
+            std::env::current_dir().expect("current dir exists"),
+            vec!["printf".into(), "hello".into()],
+            vec!["PATH".into()],
+        )
+        .expect("valid request is accepted")
+        .with_microvm_image("alpine");
+
+        assert_eq!(request.microvm_image(), Some("alpine"));
     }
 
     #[test]

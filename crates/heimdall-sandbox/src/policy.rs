@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 use heimdall_core::{
-    AgentPolicy, EnvPolicy, ExecRequest, FilesystemPolicy, NetworkMode, ProcMode, StdioPolicy,
+    AgentPolicy, EnvPolicy, ExecRequest, FilesystemPolicy, NetworkMode, ProcMode, RuntimeMode,
+    StdioPolicy,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -14,6 +15,36 @@ use crate::error::{Error, Result};
 
 use crate::commands::exec::ExecArgs;
 use crate::commands::inner_exec::InnerExecArgs;
+
+/// CLI runtime policy mirrored from core [`RuntimeMode`](heimdall_core::RuntimeMode).
+///
+/// Used in CLI argument parsing and JSON policy documents.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum CliRuntimeMode {
+    /// Use the current platform sandbox backend.
+    Platform,
+    /// Use the microsandbox microVM backend.
+    Microvm,
+}
+
+impl std::fmt::Display for CliRuntimeMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Platform => formatter.write_str("platform"),
+            Self::Microvm => formatter.write_str("microvm"),
+        }
+    }
+}
+
+impl From<CliRuntimeMode> for RuntimeMode {
+    fn from(mode: CliRuntimeMode) -> Self {
+        match mode {
+            CliRuntimeMode::Platform => Self::Platform,
+            CliRuntimeMode::Microvm => Self::Microvm,
+        }
+    }
+}
 
 /// CLI stdio policy mirrored from core [`StdioPolicy`](heimdall_core::StdioPolicy).
 ///
@@ -53,6 +84,8 @@ impl From<CliStdioPolicy> for StdioPolicy {
 pub struct PolicyDocument {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) command: Vec<String>,
+    pub(crate) runtime: Option<CliRuntimeMode>,
+    pub(crate) image: Option<String>,
     #[serde(flatten)]
     pub(crate) sandbox: SandboxConfig,
     pub(crate) stdio: Option<CliStdioPolicy>,
@@ -157,6 +190,8 @@ pub fn reject_unknown_policy_fields(value: &serde_json::Value) -> Result<()> {
             key.as_str(),
             "cwd"
                 | "command"
+                | "runtime"
+                | "image"
                 | "enabled"
                 | "network"
                 | "proc"
@@ -175,9 +210,19 @@ pub fn reject_unknown_policy_fields(value: &serde_json::Value) -> Result<()> {
 
 /// Convert a parsed policy document into a core execution request.
 pub fn policy_document_request(policy: PolicyDocument) -> Result<ExecRequest> {
+    policy_document_request_with_runtime(policy, None)
+}
+
+/// Convert a parsed policy document into a core execution request with an optional runtime override.
+pub fn policy_document_request_with_runtime(
+    policy: PolicyDocument,
+    runtime_override: Option<CliRuntimeMode>,
+) -> Result<ExecRequest> {
     let PolicyDocument {
         cwd,
         command,
+        runtime,
+        image,
         sandbox,
         stdio,
     } = policy;
@@ -197,15 +242,31 @@ pub fn policy_document_request(policy: PolicyDocument) -> Result<ExecRequest> {
         Some(cwd) => expand_path(cwd)?,
         None => current_directory()?,
     };
-    ExecRequest::new(cwd, command, allowed_env)
-        .map(|request| {
-            request
-                .with_env_policy(env_policy, denied_env)
-                .with_stdio_policy(stdio.unwrap_or(CliStdioPolicy::Inherit).into())
-                .with_network_mode(network_mode)
-                .with_proc_mode(proc_mode)
-                .with_agent_policy(agent_policy)
-        })
+    let effective_runtime = runtime_override
+        .or(runtime)
+        .unwrap_or(CliRuntimeMode::Platform);
+    let request = ExecRequest::new(cwd, command, allowed_env).map(|request| {
+        request
+            .with_env_policy(env_policy, denied_env)
+            .with_runtime_mode(effective_runtime.into())
+            .with_stdio_policy(stdio.unwrap_or(CliStdioPolicy::Inherit).into())
+            .with_network_mode(network_mode)
+            .with_proc_mode(proc_mode)
+            .with_agent_policy(agent_policy)
+    });
+    let request = match (effective_runtime, image) {
+        (CliRuntimeMode::Microvm, Some(image)) if !image.is_empty() => {
+            request.map(|request| request.with_microvm_image(image))
+        }
+        (CliRuntimeMode::Microvm, _) => Err(heimdall_core::Error::sandbox_misconfiguration(
+            "microvm runtime requires non-empty policy image",
+        )),
+        (CliRuntimeMode::Platform, Some(_)) => Err(heimdall_core::Error::sandbox_misconfiguration(
+            "policy image requires runtime microvm",
+        )),
+        (CliRuntimeMode::Platform, None) => request,
+    };
+    request
         .and_then(|request| request.with_filesystem_policy(filesystem_policy))
         .map_err(|error| Error::policy(error.to_string()))
 }
@@ -286,7 +347,7 @@ pub fn exec_args_to_request(args: ExecArgs) -> Result<ExecRequest> {
                 "--policy cannot be combined with direct exec arguments",
             ));
         }
-        return policy_document_request(read_policy_document(&policy)?);
+        return policy_document_request_with_runtime(read_policy_document(&policy)?, args.runtime);
     }
 
     let cwd = match args.cwd {
@@ -301,10 +362,17 @@ pub fn exec_args_to_request(args: ExecArgs) -> Result<ExecRequest> {
     } else {
         EnvPolicy::Blocklist
     };
+    let runtime = args.runtime.unwrap_or(CliRuntimeMode::Platform);
+    if runtime == CliRuntimeMode::Microvm {
+        return Err(Error::arguments(
+            "--runtime microvm requires --policy with non-empty image",
+        ));
+    }
     ExecRequest::new(cwd, args.command, args.allow_env)
         .map(|request| {
             request
                 .with_env_policy(env_policy, args.deny_env)
+                .with_runtime_mode(runtime.into())
                 .with_stdio_policy(args.stdio.into())
                 .with_proc_mode(if args.no_proc {
                     ProcMode::Disabled

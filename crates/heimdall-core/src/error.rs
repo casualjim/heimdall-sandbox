@@ -34,6 +34,10 @@ pub enum Error {
     #[cfg(target_os = "macos")]
     #[error(transparent)]
     MacosSandbox(#[from] heimdall_macos_sandbox::Error),
+    /// MicroVM sandbox execution failed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[error(transparent)]
+    MicrovmSandbox(#[from] heimdall_microvm_sandbox::Error),
     /// Sandbox policy or platform setup is invalid.
     #[error("sandbox misconfiguration: {0}")]
     SandboxMisconfiguration(String),
@@ -87,6 +91,8 @@ impl Error {
             Self::LinuxSandbox(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
             #[cfg(target_os = "macos")]
             Self::MacosSandbox(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::MicrovmSandbox(_) => SANDBOX_MISCONFIGURATION_EXIT_CODE,
         }
     }
 }
