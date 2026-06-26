@@ -2,15 +2,16 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
 
-use heimdall_sandbox_policy::{AgentPolicy, FilesystemPolicy, NetworkMode, ProcMode};
+use heimdall_sandbox_policy::{
+    AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, NetworkMode, ProcMode,
+};
 use microsandbox::{ExecEvent, Sandbox};
 
 use crate::environment::utf8_environment;
+use crate::filesystem::{FilesystemPlan, GUEST_WORKDIR, plan_filesystem};
 use crate::naming::sandbox_name;
 use crate::preflight::preflight_host;
 use crate::{Error, Result};
-
-const GUEST_WORKDIR: &str = "/workspace";
 
 /// Structured input used to run a command in a microsandbox microVM.
 pub struct MicrovmRequest<'a> {
@@ -55,11 +56,6 @@ impl MicrovmRequest<'_> {
                 "microvm runtime requires non-empty policy image",
             ));
         }
-        if !self.filesystem_policy.is_empty() {
-            return Err(Error::unsupported_policy(
-                "microvm runtime does not yet support filesystem policy parity",
-            ));
-        }
         if self.proc_mode != ProcMode::Default {
             return Err(Error::unsupported_policy(
                 "microvm runtime does not yet support proc=none parity",
@@ -78,12 +74,16 @@ impl MicrovmRequest<'_> {
             path: self.cwd.to_path_buf(),
             source,
         })?;
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, self.filesystem_policy)
+            .materialize()
+            .map_err(Error::from)?;
+        let plan = plan_filesystem(&cwd, &materialized, self.filesystem_policy.virtual_files())?;
         let environment = utf8_environment(self.environment)?;
         let mut builder = Sandbox::builder(sandbox_name()?)
             .image(self.image)
             .workdir(GUEST_WORKDIR)
-            .volume(GUEST_WORKDIR, |mount| mount.bind(cwd))
             .envs(environment);
+        builder = Self::apply_filesystem_plan(builder, &plan);
         if self.network_mode == NetworkMode::None {
             builder = builder.disable_network();
         }
@@ -96,6 +96,29 @@ impl MicrovmRequest<'_> {
             (Err(error), Ok(_)) | (Err(error), Err(_)) => Err(error),
             (Ok(_), Err(error)) => Err(error),
         }
+    }
+
+    fn apply_filesystem_plan(
+        mut builder: microsandbox::sandbox::SandboxBuilder,
+        plan: &FilesystemPlan,
+    ) -> microsandbox::sandbox::SandboxBuilder {
+        for volume in &plan.volumes {
+            let host = volume.host.clone();
+            let readonly = volume.readonly;
+            builder = builder.volume(volume.guest.clone(), move |mount| {
+                let mount = mount.bind(host);
+                if readonly { mount.readonly() } else { mount }
+            });
+        }
+        if !plan.virtual_files.is_empty() {
+            builder = builder.patch(|mut patches| {
+                for file in &plan.virtual_files {
+                    patches = patches.text(file.guest.clone(), file.content.clone(), None, true);
+                }
+                patches
+            });
+        }
+        builder
     }
 
     async fn execute_command(&self, sandbox: &Sandbox) -> Result<i32> {
@@ -145,28 +168,6 @@ mod tests {
         let error = request.validate_policy().expect_err("empty image rejects");
 
         assert!(error.to_string().contains("non-empty policy image"));
-    }
-
-    #[test]
-    fn rejects_filesystem_policy() {
-        let policy =
-            FilesystemPolicy::new(vec!["secret".to_string()], Vec::new(), Default::default());
-        let request = MicrovmRequest {
-            cwd: Path::new("."),
-            argv: &["true".to_string()],
-            image: "alpine",
-            environment: &[],
-            network_mode: NetworkMode::Host,
-            filesystem_policy: &policy,
-            proc_mode: ProcMode::Default,
-            agent_policy: AgentPolicy::default(),
-        };
-
-        let error = request
-            .validate_policy()
-            .expect_err("filesystem policy rejects");
-
-        assert!(error.to_string().contains("filesystem policy parity"));
     }
 
     #[test]

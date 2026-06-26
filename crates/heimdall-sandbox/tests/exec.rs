@@ -30,17 +30,6 @@ fn unique_temp_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn unique_short_socket_dir() -> std::path::PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time is after Unix epoch")
-        .as_nanos();
-    let dir = std::path::PathBuf::from("/tmp").join(format!("hd-{}-{stamp}", std::process::id()));
-    std::fs::create_dir(&dir).expect("short socket dir is created");
-    dir
-}
-
 #[cfg(target_os = "macos")]
 fn unique_project_dir(name: &str) -> std::path::PathBuf {
     let stamp = SystemTime::now()
@@ -202,26 +191,6 @@ fn policy_validate_accepts_microvm_runtime_with_image() {
 
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
-}
-
-#[test]
-fn microvm_runtime_rejects_filesystem_policy_without_platform_fallback() {
-    let policy = serde_json::json!({
-        "cwd": ".",
-        "command": ["true"],
-        "runtime": "microvm",
-        "image": "alpine",
-        "filesystem": { "deny": ["secret"] }
-    })
-    .to_string();
-
-    let output = run_policy(&policy);
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("microvm runtime does not yet support filesystem policy parity")
-    );
 }
 
 #[test]

@@ -1,9 +1,12 @@
+use std::path::Path;
+
 use crate::{Error, Result};
 
 pub(crate) fn preflight_host() -> Result<()> {
     preflight_supported_host()?;
-    microsandbox::config::resolve_msb_path().map_err(Error::from)?;
-    microsandbox::config::resolve_libkrunfw_path().map_err(Error::from)?;
+    let config = microsandbox::config::load_persisted_config_or_default().map_err(Error::from)?;
+    microsandbox::config::resolve_msb_path(&config).map_err(Error::from)?;
+    microsandbox::config::resolve_libkrunfw_path(&config).map_err(Error::from)?;
     preflight_kvm()?;
     Ok(())
 }

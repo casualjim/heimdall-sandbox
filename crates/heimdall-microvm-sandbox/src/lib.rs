@@ -1,6 +1,7 @@
 //! Microsandbox microVM sandbox execution backend.
 
 mod environment;
+mod filesystem;
 mod naming;
 mod preflight;
 mod request;
@@ -32,6 +33,20 @@ pub enum Error {
     /// Microsandbox SDK operation failed.
     #[error("sandbox misconfiguration: microsandbox failed: {0}")]
     Microsandbox(#[source] microsandbox::MicrosandboxError),
+    /// Filesystem policy materialization failed.
+    #[error("sandbox misconfiguration: {0}")]
+    SandboxPolicy(#[source] heimdall_sandbox_policy::Error),
+    /// Host directory walk failed while planning filesystem mounts.
+    #[error(
+        "sandbox misconfiguration: failed to read {path} while planning microvm mounts: {source}"
+    )]
+    FilesystemPlan {
+        /// Directory that could not be read.
+        path: PathBuf,
+        /// Underlying I/O failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// Tokio runtime setup failed.
     #[error("sandbox misconfiguration: failed to create microvm async runtime: {0}")]
     Runtime(#[source] std::io::Error),
@@ -70,5 +85,11 @@ impl Error {
 impl From<microsandbox::MicrosandboxError> for Error {
     fn from(error: microsandbox::MicrosandboxError) -> Self {
         Self::Microsandbox(error)
+    }
+}
+
+impl From<heimdall_sandbox_policy::Error> for Error {
+    fn from(error: heimdall_sandbox_policy::Error) -> Self {
+        Self::SandboxPolicy(error)
     }
 }
