@@ -396,3 +396,319 @@ pub fn inner_exec_args_to_request(args: InnerExecArgs) -> Result<ExecRequest> {
         })
         .map_err(|error| Error::arguments(error.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use heimdall_core::{AgentPolicy, EnvPolicy, ProcMode, RuntimeMode, StdioPolicy};
+
+    use super::*;
+
+    #[test]
+    fn policy_document_with_allow_and_deny_uses_allowlist_with_deny_override() {
+        let request = policy_document_request(PolicyDocument {
+            cwd: Some(PathBuf::from(".")),
+            command: vec!["printf".to_string(), "hello".to_string()],
+            runtime: None,
+            image: None,
+            sandbox: SandboxConfig {
+                env: Some(PolicyEnvironment {
+                    allow: Some(vec!["PATH".to_string(), "SECRET".to_string()]),
+                    deny: Some(vec!["SECRET".to_string()]),
+                }),
+                ..SandboxConfig::default()
+            },
+            stdio: Some(CliStdioPolicy::Piped),
+        })
+        .expect("policy converts");
+
+        assert_eq!(request.env_policy(), EnvPolicy::Allowlist);
+        assert_eq!(request.allowed_env(), ["PATH", "SECRET"]);
+        assert_eq!(request.denied_env(), ["SECRET"]);
+        assert_eq!(request.stdio_policy(), StdioPolicy::Piped);
+    }
+
+    #[test]
+    fn policy_document_without_allow_uses_blocklist() {
+        let request = policy_document_request(PolicyDocument {
+            cwd: Some(PathBuf::from(".")),
+            command: vec!["printf".to_string(), "hello".to_string()],
+            runtime: None,
+            image: None,
+            sandbox: SandboxConfig {
+                env: Some(PolicyEnvironment {
+                    allow: None,
+                    deny: Some(vec!["SECRET".to_string()]),
+                }),
+                ..SandboxConfig::default()
+            },
+            stdio: None,
+        })
+        .expect("policy converts");
+
+        assert_eq!(request.env_policy(), EnvPolicy::Blocklist);
+        assert_eq!(request.denied_env(), ["SECRET"]);
+        assert_eq!(request.stdio_policy(), StdioPolicy::Inherit);
+    }
+
+    #[test]
+    fn policy_document_accepts_shared_sandbox_config_shape() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "enabled": true,
+              "network": "host",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "env": { "allow": ["PATH"], "deny": null },
+              "stdio": "piped"
+            }"#,
+        )
+        .expect("shared policy JSON parses");
+
+        let request = policy_document_request(policy).expect("policy converts");
+
+        assert_eq!(request.env_policy(), EnvPolicy::Allowlist);
+        assert_eq!(request.allowed_env(), ["PATH"]);
+        assert!(request.denied_env().is_empty());
+        assert_eq!(request.stdio_policy(), StdioPolicy::Piped);
+    }
+
+    #[test]
+    fn policy_document_accepts_microvm_runtime() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("runtime converts");
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Microvm);
+        assert_eq!(request.microvm_image(), Some("alpine"));
+    }
+
+    #[test]
+    fn policy_document_rejects_microvm_runtime_without_image() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request(policy).expect_err("microvm image is required");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires non-empty policy image")
+        );
+    }
+
+    #[test]
+    fn cli_runtime_overrides_policy_runtime() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "platform",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request_with_runtime(policy, Some(CliRuntimeMode::Microvm))
+            .expect("runtime override converts");
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Microvm);
+        assert_eq!(request.microvm_image(), Some("alpine"));
+    }
+
+    #[test]
+    fn cli_platform_override_rejects_policy_image() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request_with_runtime(policy, Some(CliRuntimeMode::Platform))
+            .expect_err("platform runtime rejects image");
+
+        assert!(
+            error
+                .to_string()
+                .contains("policy image requires runtime microvm")
+        );
+    }
+
+    #[test]
+    fn policy_document_accepts_no_proc_mode() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "proc": "none",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("proc mode converts");
+
+        assert_eq!(request.proc_mode(), ProcMode::Disabled);
+    }
+
+    #[test]
+    fn policy_document_accepts_agent_socket_opt_ins() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "gpgAgent": true,
+              "sshAgent": true,
+              "ageAgent": false,
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("agent policy converts");
+
+        assert_eq!(request.agent_policy(), AgentPolicy::new(true, true, false));
+        assert!(request.needs_isolation());
+    }
+
+    #[test]
+    fn policy_document_accepts_network_isolation() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "network": "none",
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("network isolation converts");
+
+        assert_eq!(request.network_mode(), heimdall_core::NetworkMode::None);
+        assert!(request.needs_isolation());
+    }
+
+    #[test]
+    fn policy_document_accepts_filesystem_policy() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "filesystem": {
+                "deny": ["**/.env*", "!**/.env.example"],
+                "writable": ["src/**"],
+                "virtual": { "/etc/passwd": "nobody:x:65534:65534:Nobody:/nonexistent:/usr/sbin/nologin\n" }
+              }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("filesystem isolation converts");
+
+        assert_eq!(
+            request.filesystem_policy().deny(),
+            ["**/.env*", "!**/.env.example"]
+        );
+        assert_eq!(request.filesystem_policy().writable(), ["src/**"]);
+        assert!(
+            request
+                .filesystem_policy()
+                .virtual_files()
+                .contains_key(&PathBuf::from("/etc/passwd"))
+        );
+        assert!(request.needs_isolation());
+    }
+
+    #[test]
+    fn policy_document_accepts_omitted_filesystem_fields() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "filesystem": {}
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("empty filesystem converts");
+
+        assert!(request.filesystem_policy().is_empty());
+    }
+
+    #[test]
+    fn policy_document_rejects_relative_virtual_path() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "filesystem": { "virtual": { "etc/passwd": "content" } }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request(policy).expect_err("relative virtual path is rejected");
+
+        assert!(error.to_string().contains("filesystem.virtual"));
+        assert!(error.to_string().contains("must be absolute"));
+    }
+
+    #[test]
+    fn policy_schema_has_expected_shape() {
+        let schema = serde_json::to_value(schemars::schema_for!(PolicyDocument))
+            .expect("policy schema serializes");
+
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["required"].as_array().is_some_and(|required| {
+            required
+                .iter()
+                .any(|field| field.as_str() == Some("command"))
+        }));
+        assert!(schema["properties"].get("filesystem").is_some());
+        assert!(schema["properties"].get("runtime").is_some());
+        assert!(schema["properties"].get("image").is_some());
+        assert!(schema["properties"].get("gpgAgent").is_some());
+        assert!(schema["properties"].get("sshAgent").is_some());
+        assert!(schema["properties"].get("ageAgent").is_some());
+        assert_eq!(
+            schema["$defs"]["PolicyFilesystem"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            schema["$defs"]["PolicyEnvironment"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
+    fn policy_document_rejects_unknown_fields() {
+        let value = serde_json::from_str::<serde_json::Value>(
+            r#"{
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "bogus": true
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = reject_unknown_policy_fields(&value).expect_err("unknown field is rejected");
+
+        assert!(error.to_string().contains("unknown policy field: bogus"));
+    }
+}
