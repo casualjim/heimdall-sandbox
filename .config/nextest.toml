@@ -3,3 +3,18 @@
 retries = 3
 # Any test that runs longer than 30 seconds is considered hung.
 slow-timeout = { period = "30s", terminate-after = 1 }
+
+# Opt-in profile for microVM integration tests. These tests are `#[ignore]` in
+# the source because they boot real microVMs via `msb` + libkrun + KVM and need
+# a virtualization-capable host. Select them on the command line with
+# `--run-ignored only`; this profile only tunes how they run.
+#
+# Run via:  mise run test:microvm
+#   (equivalently: cargo nextest run --profile microvm --run-ignored only \
+#                  -p heimdall-microvm-sandbox)
+[profile.microvm]
+test-threads = 1
+retries = 0
+fail-fast = false
+# First runs pull the alpine image; allow up to 4 minutes per test.
+slow-timeout = { period = "60s", terminate-after = 4 }

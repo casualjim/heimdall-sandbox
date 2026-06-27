@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+#MISE description="Run microVM integration tests (requires KVM + msb + libkrunfw)"
+#MISE sources=["crates/heimdall-microvm-sandbox/**", ".config/nextest.toml"]
+#MISE depends=["build:debug"]
+
+# These tests are #[ignore]'d because they boot real microVMs. The microvm
+# nextest profile runs them serially with an extended slow-timeout; --run-ignored
+# only selects the ignored tests so the default suite is unaffected.
+cargo nextest run --profile microvm --run-ignored only -p heimdall-microvm-sandbox

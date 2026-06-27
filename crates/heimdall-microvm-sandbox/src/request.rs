@@ -79,11 +79,15 @@ impl MicrovmRequest<'_> {
             .map_err(Error::from)?;
         let plan = plan_filesystem(&cwd, &materialized, self.filesystem_policy.virtual_files())?;
         let environment = utf8_environment(self.environment)?;
-        let mut builder = Sandbox::builder(sandbox_name()?)
+        let builder = Sandbox::builder(sandbox_name()?)
             .image(self.image)
-            .workdir(GUEST_WORKDIR)
-            .envs(environment);
-        builder = Self::apply_filesystem_plan(builder, &plan);
+            .ephemeral(true);
+        // Add filesystem mounts before setting the workdir: the workdir points at
+        // /workspace, which the workspace bind mount creates in the guest. The
+        // SDK validates the workdir exists after start, so the mount must be in
+        // the config first (mirrors `msb run --mount-dir ... -w /workspace`).
+        let builder = Self::apply_filesystem_plan(builder, &plan);
+        let mut builder = builder.workdir(GUEST_WORKDIR).envs(environment);
         if self.network_mode == NetworkMode::None {
             builder = builder.disable_network();
         }

@@ -65,29 +65,36 @@ pub(crate) fn plan_filesystem(
     virtual_files: &BTreeMap<PathBuf, String>,
 ) -> Result<FilesystemPlan> {
     let holes = materialized.deny_targets().clone();
-    let writable = materialized.writable_targets().clone();
+    let mut writable = materialized.writable_targets().clone();
 
-    let mut readonly_targets: BTreeSet<PathBuf> = materialized
+    let readonly_targets: BTreeSet<PathBuf> = materialized
         .readable_targets()
         .union(materialized.protected_targets())
         .cloned()
         .collect();
-    // The workspace is always mounted. When no writable rule covers it, it is
-    // exposed read-only, matching the bubblewrap backend's default cwd binding.
-    if !writable.contains(cwd) && !readonly_targets.contains(cwd) {
-        readonly_targets.insert(cwd.to_path_buf());
+
+    // The workspace (cwd) is always mounted. Default to writable so the child
+    // can write artifacts back to its host working directory unless an explicit
+    // deny rule or readonly target covers it.
+    if !writable.contains(cwd) && !readonly_targets.contains(cwd) && !holes.contains(cwd) {
+        writable.insert(cwd.to_path_buf());
     }
 
     let mut out: BTreeMap<String, VolumePlan> = BTreeMap::new();
 
-    // Read-only pass carves around deny holes and writable islands.
-    let readonly_cuts: BTreeSet<PathBuf> = holes.union(&writable).cloned().collect();
+    // Deny holes are the only cuts that require carving: a denied path is not
+    // mounted at all, so a writable or readonly ancestor must be split around
+    // it. Readonly islands overlay their writable ancestors (mounted whole),
+    // so they do not carve — mounting `/workspace` writable and
+    // `/workspace/.git` readonly on top achieves the protection without
+    // fragmenting the workspace mount (which previously left an empty cwd with
+    // no `/workspace` mount at all).
+    let readonly_cuts: BTreeSet<PathBuf> = holes.clone();
     for target in &readonly_targets {
         add_target(cwd, target, true, &readonly_cuts, &mut out)?;
     }
 
-    // Writable pass carves around deny holes and read-only islands.
-    let writable_cuts: BTreeSet<PathBuf> = holes.union(&readonly_targets).cloned().collect();
+    let writable_cuts: BTreeSet<PathBuf> = holes.clone();
     for target in &writable {
         add_target(cwd, target, false, &writable_cuts, &mut out)?;
     }
@@ -241,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_policy_mounts_workspace_readonly() {
+    fn empty_policy_mounts_workspace_writable() {
         let cwd = unique_dir("empty");
         let materialized = MaterializedFilesystemPolicy::empty();
 
@@ -252,7 +259,7 @@ mod tests {
             vec![VolumePlan {
                 guest: "/workspace".to_string(),
                 host: cwd.clone(),
-                readonly: true,
+                readonly: false,
             }]
         );
     }
@@ -298,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_island_inside_writable_cwd_is_readonly() {
+    fn protected_island_overlays_writable_workspace() {
         let cwd = unique_dir("protected");
         let src = cwd.join("src");
         let control = cwd.join("control");
@@ -309,21 +316,21 @@ mod tests {
 
         let plan = plan_filesystem(&cwd, &materialized, &BTreeMap::new()).expect("plan built");
 
+        let workspace = plan
+            .volumes
+            .iter()
+            .find(|v| v.guest == "/workspace")
+            .expect("workspace mounted whole writable");
+        assert!(!workspace.readonly, "workspace is writable");
         let control_mount = plan
             .volumes
             .iter()
             .find(|v| v.guest == "/workspace/control")
-            .expect("control mounted");
+            .expect("control mounted as readonly overlay");
         assert!(control_mount.readonly, "protected island read-only");
-        let src_mount = plan
-            .volumes
-            .iter()
-            .find(|v| v.guest == "/workspace/src")
-            .expect("src mounted");
-        assert!(!src_mount.readonly, "sibling stays writable");
         assert!(
-            !plan.volumes.iter().any(|v| v.guest == "/workspace"),
-            "cwd split around protected island, not bound whole"
+            !plan.volumes.iter().any(|v| v.guest == "/workspace/src"),
+            "src is covered by the whole workspace mount, not mounted separately"
         );
     }
 
