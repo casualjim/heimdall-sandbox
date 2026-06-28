@@ -64,158 +64,181 @@ pub(crate) fn plan_filesystem(
     materialized: &MaterializedFilesystemPolicy,
     virtual_files: &BTreeMap<PathBuf, String>,
 ) -> Result<FilesystemPlan> {
-    let holes = materialized.deny_targets().clone();
-    let mut writable = materialized.writable_targets().clone();
-
-    let readonly_targets: BTreeSet<PathBuf> = materialized
-        .readable_targets()
-        .union(materialized.protected_targets())
-        .cloned()
-        .collect();
-
-    // The workspace (cwd) is always mounted. Default to writable so the child
-    // can write artifacts back to its host working directory unless an explicit
-    // deny rule or readonly target covers it.
-    if !writable.contains(cwd) && !readonly_targets.contains(cwd) && !holes.contains(cwd) {
-        writable.insert(cwd.to_path_buf());
-    }
-
-    let mut out: BTreeMap<String, VolumePlan> = BTreeMap::new();
-
-    // Deny holes are the only cuts that require carving: a denied path is not
-    // mounted at all, so a writable or readonly ancestor must be split around
-    // it. Readonly islands overlay their writable ancestors (mounted whole),
-    // so they do not carve — mounting `/workspace` writable and
-    // `/workspace/.git` readonly on top achieves the protection without
-    // fragmenting the workspace mount (which previously left an empty cwd with
-    // no `/workspace` mount at all).
-    let readonly_cuts: BTreeSet<PathBuf> = holes.clone();
-    for target in &readonly_targets {
-        add_target(cwd, target, true, &readonly_cuts, &mut out)?;
-    }
-
-    let writable_cuts: BTreeSet<PathBuf> = holes.clone();
-    for target in &writable {
-        add_target(cwd, target, false, &writable_cuts, &mut out)?;
-    }
-
-    let mut plan = FilesystemPlan {
-        volumes: out.into_values().collect(),
-        virtual_files: Vec::new(),
-    };
-    for (path, content) in virtual_files {
-        plan.virtual_files.push(VirtualFilePlan {
-            guest: map_guest(cwd, path)?,
-            content: content.clone(),
-        });
-    }
-    Ok(plan)
+    FilesystemPlanner::new(cwd, materialized, virtual_files).plan()
 }
 
-/// Mount `target` with the given access, splitting it around any `cuts` it
-/// contains so denied or opposite-access descendants are excluded.
-fn add_target(
-    cwd: &Path,
-    target: &Path,
-    readonly: bool,
-    cuts: &BTreeSet<PathBuf>,
-    out: &mut BTreeMap<String, VolumePlan>,
-) -> Result<()> {
-    // ponytail: a missing target is a no-op; nothing to bind and the guest path
-    // simply stays absent (deny-by-default). Matches bubblewrap optional binds.
-    if !target.exists() {
-        return Ok(());
-    }
-    if target.is_dir() && has_descendant_cut(target, cuts) {
-        cover_split(cwd, target, readonly, cuts, out)?;
-    } else {
-        insert_mount(cwd, target, readonly, out)?;
-    }
-    Ok(())
+/// Builds a microVM filesystem plan from a materialized policy.
+///
+/// Carries the workspace root, the deny holes, and the accumulated mounts so the
+/// planning helpers operate as methods instead of threading the same arguments
+/// through every call.
+struct FilesystemPlanner<'a> {
+    cwd: &'a Path,
+    /// Deny targets: never mounted, and the only cuts that force an ancestor to
+    /// split around them.
+    holes: BTreeSet<PathBuf>,
+    writable: BTreeSet<PathBuf>,
+    readonly_targets: BTreeSet<PathBuf>,
+    virtual_files: &'a BTreeMap<PathBuf, String>,
+    mounts: BTreeMap<String, VolumePlan>,
 }
 
-/// Mount each child of `dir` that is neither a cut nor contains a cut, recursing
-/// into children that still straddle a cut.
-fn cover_split(
-    cwd: &Path,
-    dir: &Path,
-    readonly: bool,
-    cuts: &BTreeSet<PathBuf>,
-    out: &mut BTreeMap<String, VolumePlan>,
-) -> Result<()> {
-    let entries = std::fs::read_dir(dir).map_err(|source| Error::FilesystemPlan {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| Error::FilesystemPlan {
+impl<'a> FilesystemPlanner<'a> {
+    fn new(
+        cwd: &'a Path,
+        materialized: &'a MaterializedFilesystemPolicy,
+        virtual_files: &'a BTreeMap<PathBuf, String>,
+    ) -> Self {
+        let holes = materialized.deny_targets().clone();
+        let mut writable = materialized.writable_targets().clone();
+        let readonly_targets: BTreeSet<PathBuf> = materialized
+            .readable_targets()
+            .union(materialized.protected_targets())
+            .cloned()
+            .collect();
+
+        // The workspace (cwd) is always mounted. Default to writable so the child
+        // can write artifacts back to its host working directory unless an
+        // explicit deny rule or readonly target covers it.
+        if !writable.contains(cwd) && !readonly_targets.contains(cwd) && !holes.contains(cwd) {
+            writable.insert(cwd.to_path_buf());
+        }
+
+        Self {
+            cwd,
+            holes,
+            writable,
+            readonly_targets,
+            virtual_files,
+            mounts: BTreeMap::new(),
+        }
+    }
+
+    fn plan(mut self) -> Result<FilesystemPlan> {
+        // Deny holes are the only cuts that require carving: a denied path is not
+        // mounted at all, so a writable or readonly ancestor must be split around
+        // it. Readonly islands overlay their writable ancestors (mounted whole),
+        // so they do not carve — mounting `/workspace` writable and
+        // `/workspace/.git` readonly on top achieves the protection without
+        // fragmenting the workspace mount (which previously left an empty cwd
+        // with no `/workspace` mount at all).
+
+        // Collect the targets up front so the mutable `add_target` calls do not
+        // borrow `self` while iterating.
+        let readonly_targets = self.readonly_targets.iter().cloned().collect::<Vec<_>>();
+        for target in &readonly_targets {
+            self.add_target(target, true)?;
+        }
+        let writable = self.writable.iter().cloned().collect::<Vec<_>>();
+        for target in &writable {
+            self.add_target(target, false)?;
+        }
+
+        let mut virtual_files_out = Vec::new();
+        for (path, content) in self.virtual_files {
+            virtual_files_out.push(VirtualFilePlan {
+                guest: self.map_guest(path)?,
+                content: content.clone(),
+            });
+        }
+        let plan = FilesystemPlan {
+            volumes: self.mounts.into_values().collect(),
+            virtual_files: virtual_files_out,
+        };
+        Ok(plan)
+    }
+
+    /// Mount `target` with the given access, splitting it around any deny hole it
+    /// contains so the denied descendant is excluded.
+    fn add_target(&mut self, target: &Path, readonly: bool) -> Result<()> {
+        // ponytail: a missing target is a no-op; nothing to bind and the guest
+        // path simply stays absent (deny-by-default). Matches bubblewrap optional
+        // binds.
+        if !target.exists() {
+            return Ok(());
+        }
+        if target.is_dir() && self.has_descendant_cut(target) {
+            self.cover_split(target, readonly)?;
+        } else {
+            self.insert_mount(target, readonly)?;
+        }
+        Ok(())
+    }
+
+    /// Mount each child of `dir` that is neither a deny hole nor contains one,
+    /// recursing into children that still straddle a hole.
+    fn cover_split(&mut self, dir: &Path, readonly: bool) -> Result<()> {
+        let entries = std::fs::read_dir(dir).map_err(|source| Error::FilesystemPlan {
             path: dir.to_path_buf(),
             source,
         })?;
-        let child = entry.path();
-        if cuts.contains(&child) {
-            // A deny hole, or a target handled by its own pass; never mount here.
-            continue;
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::FilesystemPlan {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+            let child = entry.path();
+            if self.holes.contains(&child) {
+                // A deny hole; never mount here.
+                continue;
+            }
+            if self.has_descendant_cut(&child) {
+                self.cover_split(&child, readonly)?;
+            } else {
+                self.insert_mount(&child, readonly)?;
+            }
         }
-        if has_descendant_cut(&child, cuts) {
-            cover_split(cwd, &child, readonly, cuts, out)?;
-        } else {
-            insert_mount(cwd, &child, readonly, out)?;
-        }
+        Ok(())
     }
-    Ok(())
-}
 
-/// Whether any cut is a strict descendant of `dir`.
-fn has_descendant_cut(dir: &Path, cuts: &BTreeSet<PathBuf>) -> bool {
-    cuts.iter().any(|cut| cut != dir && cut.starts_with(dir))
-}
+    /// Whether any deny hole is a strict descendant of `dir`.
+    fn has_descendant_cut(&self, dir: &Path) -> bool {
+        self.holes
+            .iter()
+            .any(|cut| cut != dir && cut.starts_with(dir))
+    }
 
-/// Insert a single mount, rejecting any conflicting duplicate guest path.
-fn insert_mount(
-    cwd: &Path,
-    host: &Path,
-    readonly: bool,
-    out: &mut BTreeMap<String, VolumePlan>,
-) -> Result<()> {
-    let guest = map_guest(cwd, host)?;
-    let plan = VolumePlan {
-        guest: guest.clone(),
-        host: host.to_path_buf(),
-        readonly,
-    };
-    if let Some(existing) = out.get(&guest) {
-        if existing != &plan {
+    /// Insert a single mount, rejecting any conflicting duplicate guest path.
+    fn insert_mount(&mut self, host: &Path, readonly: bool) -> Result<()> {
+        let guest = self.map_guest(host)?;
+        let plan = VolumePlan {
+            guest: guest.clone(),
+            host: host.to_path_buf(),
+            readonly,
+        };
+        if let Some(existing) = self.mounts.get(&guest) {
+            if existing != &plan {
+                return Err(Error::unsupported_policy(format!(
+                    "microvm filesystem policy maps conflicting mounts to guest path {guest}"
+                )));
+            }
+            return Ok(());
+        }
+        self.mounts.insert(guest, plan);
+        Ok(())
+    }
+
+    /// Map a host path to its guest mount path: workspace-relative paths land
+    /// under [`GUEST_WORKDIR`]; everything else keeps its absolute path.
+    fn map_guest(&self, host: &Path) -> Result<String> {
+        let guest = match host.strip_prefix(self.cwd) {
+            Ok(relative) if relative.as_os_str().is_empty() => PathBuf::from(GUEST_WORKDIR),
+            Ok(relative) => Path::new(GUEST_WORKDIR).join(relative),
+            Err(_) => host.to_path_buf(),
+        };
+        let guest = guest.to_str().ok_or_else(|| {
+            Error::unsupported_policy(format!(
+                "microvm guest path is not valid UTF-8: {}",
+                guest.display()
+            ))
+        })?;
+        if guest.contains([':', ';', ',']) {
             return Err(Error::unsupported_policy(format!(
-                "microvm filesystem policy maps conflicting mounts to guest path {guest}"
+                "microvm guest path may not contain ':', ';', or ',': {guest}"
             )));
         }
-        return Ok(());
+        Ok(guest.to_string())
     }
-    out.insert(guest, plan);
-    Ok(())
-}
-
-/// Map a host path to its guest mount path: workspace-relative paths land under
-/// [`GUEST_WORKDIR`]; everything else keeps its absolute path.
-fn map_guest(cwd: &Path, host: &Path) -> Result<String> {
-    let guest = match host.strip_prefix(cwd) {
-        Ok(relative) if relative.as_os_str().is_empty() => PathBuf::from(GUEST_WORKDIR),
-        Ok(relative) => Path::new(GUEST_WORKDIR).join(relative),
-        Err(_) => host.to_path_buf(),
-    };
-    let guest = guest.to_str().ok_or_else(|| {
-        Error::unsupported_policy(format!(
-            "microvm guest path is not valid UTF-8: {}",
-            guest.display()
-        ))
-    })?;
-    if guest.contains([':', ';', ',']) {
-        return Err(Error::unsupported_policy(format!(
-            "microvm guest path may not contain ':', ';', or ',': {guest}"
-        )));
-    }
-    Ok(guest.to_string())
 }
 
 #[cfg(test)]
