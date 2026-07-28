@@ -5,9 +5,9 @@ use crate::request::ExecRequest;
 /// Warn on stderr about microvm-only controls that the platform runtime ignores.
 ///
 /// The platform backends (bubblewrap, seatbelt) cannot honor resource limits,
-/// lifecycle timeouts, guest identity, secrets, image pull/snapshot, or the
-/// security profile. Emit one warning per configured knob so a policy written
-/// for the microvm runtime is not silently downgraded when run on platform.
+/// lifecycle timeouts, guest identity, secrets, or the security profile. Emit
+/// one warning per configured knob so a policy written for the microvm runtime
+/// is not silently downgraded when run on platform.
 pub(crate) fn warn_ignored_microvm_controls(request: &ExecRequest) {
     if let Some(image) = request.microvm_image() {
         warn_ignored("image", image);
@@ -43,26 +43,11 @@ pub(crate) fn warn_ignored_microvm_controls(request: &ExecRequest) {
     if let Some(user) = guest.user() {
         warn_ignored("microvm.guest.user", user);
     }
-    if let Some(hostname) = guest.hostname() {
-        warn_ignored("microvm.guest.hostname", hostname);
-    }
-    if let Some(shell) = guest.shell() {
-        warn_ignored("microvm.guest.shell", shell);
-    }
     if guest.entrypoint().is_some() {
         warn_ignored("microvm.guest.entrypoint", "set");
     }
-    if guest.init().is_some() {
-        warn_ignored("microvm.guest.init", "set");
-    }
     if !policy.secrets().is_empty() {
         warn_ignored("microvm.secrets", &policy.secrets().len().to_string());
-    }
-    if policy.image().pull_policy().is_some() {
-        warn_ignored("microvm.image.pull_policy", "set");
-    }
-    if policy.image().snapshot().is_some() {
-        warn_ignored("microvm.image.snapshot", "set");
     }
     if policy.security_profile().is_some() {
         warn_ignored("microvm.security", "set");

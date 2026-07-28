@@ -58,7 +58,7 @@ fn minimal_workspace_bindmount_and_workdir() {
     let cwd = unique_dir("minimal");
     let host = cwd.clone();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime builds");

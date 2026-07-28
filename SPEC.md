@@ -125,8 +125,8 @@ T22|x|map FS/network/proc/agent policy to microVM strict parity or fail closed|V
 T23|x|add microVM tests for schema, CLI precedence, dispatch, preflight, no fallback|V12,V34,V35,V37,V39,V41
 T24|x|sync README/SPEC docs for runtime field, CLI flag, microsandbox deps, host matrix|I.cmd,I.policy,V36,V37,V40
 T25|x|swap microsandbox→boxlite in `heimdall-microvm-sandbox` Cargo.toml; rewrite `request.rs` to drive `BoxliteRuntime`/`LiteBox`/`BoxCommand`|V36,V40,V46
-T26|.|switch microvm exec tokio runtime `current_thread`→`multi_thread`|V43
-T27|.|shrink `MicrovmPolicy` to boxlite native knobs; drop `snapshot`/`pullPolicy`/11-rlimits/`hostname`/`shell`/`init`/`SecretHostPattern::Any`; reject dropped fields|V39,V41
+T26|x|switch microvm exec tokio runtime `current_thread`→`multi_thread`|V43
+T27|x|shrink `MicrovmPolicy` to boxlite native knobs; drop `snapshot`/`pullPolicy`/11-rlimits/`hostname`/`shell`/`init`/`SecretHostPattern::Any`; reject dropped fields|V39,V41
 T28|.|map secrets → boxlite `Secret{name,hosts,placeholder,value}`; policy schema + `request.rs`|V44
 T29|.|live chunk stdout/stderr forwarding from boxlite `Stream<Item=String>` (concurrent drain); document lossy `U+FFFD` binary regression|V42
 T30|.|CI: unignored boxlite boot test Linux KVM; macOS HVF self-hosted/manual or dropped; remove `msb`/`libkrunfw` preflight|V37,V45

@@ -1,10 +1,13 @@
 //! MicroVM-only sandbox policy: resource limits, lifecycle, guest identity,
-//! secrets, and image integrity knobs that only apply when the microvm runtime
-//! is selected. Neutral runtime-agnostic value types; backends translate these
-//! to their own SDK types.
-
-/// Maximum guest hostname length in bytes (Linux UTS limit).
-pub const MAX_HOSTNAME_BYTES: usize = 64;
+//! secrets, and security profile knobs that only apply when the microvm
+//! runtime is selected. Neutral runtime-agnostic value types; backends
+//! translate these to their own SDK types.
+//!
+//! The surface is shrunk to boxlite-native knobs only. Dropped fields
+//! (`image.snapshot`, `image.pullPolicy`, rlimits beyond the boxlite 5,
+//! `guest.hostname`/`shell`/`init`, `SecretHostPattern::Any`) are rejected at
+//! the JSON/schema layer — they have no boxlite equivalent and are not
+//! expressible here (V39).
 
 /// MicroVM-only sandbox policy.
 ///
@@ -16,7 +19,6 @@ pub struct MicrovmPolicy {
     lifecycle: MicrovmLifecycle,
     guest: MicrovmGuest,
     secrets: Vec<MicrovmSecret>,
-    image: MicrovmImage,
     security_profile: Option<SecurityProfile>,
 }
 
@@ -28,7 +30,6 @@ impl MicrovmPolicy {
         lifecycle: MicrovmLifecycle,
         guest: MicrovmGuest,
         secrets: Vec<MicrovmSecret>,
-        image: MicrovmImage,
         security_profile: Option<SecurityProfile>,
     ) -> Self {
         Self {
@@ -36,7 +37,6 @@ impl MicrovmPolicy {
             lifecycle,
             guest,
             secrets,
-            image,
             security_profile,
         }
     }
@@ -48,7 +48,6 @@ impl MicrovmPolicy {
             && self.lifecycle.is_empty()
             && self.guest.is_empty()
             && self.secrets.is_empty()
-            && self.image.is_empty()
             && self.security_profile.is_none()
     }
 
@@ -74,12 +73,6 @@ impl MicrovmPolicy {
     #[must_use]
     pub fn secrets(&self) -> &[MicrovmSecret] {
         &self.secrets
-    }
-
-    /// Image pull and snapshot pinning policy.
-    #[must_use]
-    pub fn image(&self) -> &MicrovmImage {
-        &self.image
     }
 
     /// In-guest security profile.
@@ -186,42 +179,27 @@ impl MicrovmLifecycle {
 }
 
 /// Guest identity and boot configuration.
+///
+/// Shrunk to boxlite-native knobs: `user` and `entrypoint` only. The
+/// `hostname`, `shell`, and `init` knobs have no boxlite equivalent and are
+/// rejected at the JSON/schema layer (V39).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MicrovmGuest {
     user: Option<String>,
-    hostname: Option<String>,
-    shell: Option<String>,
     entrypoint: Option<Vec<String>>,
-    init: Option<MicrovmInit>,
 }
 
 impl MicrovmGuest {
-    /// Create guest configuration from the given knobs.
+    /// Create guest configuration from a user and optional entrypoint override.
     #[must_use]
-    pub fn new(
-        user: Option<String>,
-        hostname: Option<String>,
-        shell: Option<String>,
-        entrypoint: Option<Vec<String>>,
-        init: Option<MicrovmInit>,
-    ) -> Self {
-        Self {
-            user,
-            hostname,
-            shell,
-            entrypoint,
-            init,
-        }
+    pub fn new(user: Option<String>, entrypoint: Option<Vec<String>>) -> Self {
+        Self { user, entrypoint }
     }
 
     /// Return true when no guest knobs are configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.user.is_none()
-            && self.hostname.is_none()
-            && self.shell.is_none()
-            && self.entrypoint.is_none()
-            && self.init.is_none()
+        self.user.is_none() && self.entrypoint.is_none()
     }
 
     /// Guest user identity (e.g., `"1000"`, `"appuser"`, `"1000:1000"`).
@@ -230,62 +208,10 @@ impl MicrovmGuest {
         self.user.as_deref()
     }
 
-    /// Guest hostname.
-    #[must_use]
-    pub fn hostname(&self) -> Option<&str> {
-        self.hostname.as_deref()
-    }
-
-    /// Shell used for shell sessions.
-    #[must_use]
-    pub fn shell(&self) -> Option<&str> {
-        self.shell.as_deref()
-    }
-
     /// OCI image entrypoint override.
     #[must_use]
     pub fn entrypoint(&self) -> Option<&[String]> {
         self.entrypoint.as_deref()
-    }
-
-    /// PID 1 init handoff configuration.
-    #[must_use]
-    pub fn init(&self) -> Option<&MicrovmInit> {
-        self.init.as_ref()
-    }
-}
-
-/// PID 1 init handoff configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MicrovmInit {
-    cmd: String,
-    args: Vec<String>,
-    env: Vec<(String, String)>,
-}
-
-impl MicrovmInit {
-    /// Create an init handoff from a command path (or `"auto"`), argv, and env.
-    #[must_use]
-    pub fn new(cmd: String, args: Vec<String>, env: Vec<(String, String)>) -> Self {
-        Self { cmd, args, env }
-    }
-
-    /// Init binary path or the literal `"auto"`.
-    #[must_use]
-    pub fn cmd(&self) -> &str {
-        &self.cmd
-    }
-
-    /// Supplemental argv. `argv[0]` is implicitly `cmd`.
-    #[must_use]
-    pub fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    /// Extra env vars merged on top of the inherited env.
-    #[must_use]
-    pub fn env(&self) -> &[(String, String)] {
-        &self.env
     }
 }
 
@@ -328,62 +254,15 @@ impl MicrovmSecret {
 }
 
 /// Host pattern for secret allowlisting.
+///
+/// `Any` is dropped: a secret allowlisting every host can be exfiltrated and
+/// has no boxlite equivalent (V39). Only `Exact` and `Wildcard` are accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretHostPattern {
     /// Exact hostname match.
     Exact(String),
     /// Wildcard match (e.g., `*.openai.com`).
     Wildcard(String),
-    /// Any host (dangerous: secret can be exfiltrated).
-    Any,
-}
-
-/// Image pull and snapshot pinning policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MicrovmImage {
-    pull_policy: Option<PullPolicy>,
-    snapshot: Option<String>,
-}
-
-impl MicrovmImage {
-    /// Create image policy from a pull policy and optional snapshot reference.
-    #[must_use]
-    pub fn new(pull_policy: Option<PullPolicy>, snapshot: Option<String>) -> Self {
-        Self {
-            pull_policy,
-            snapshot,
-        }
-    }
-
-    /// Return true when no image knobs are configured.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.pull_policy.is_none() && self.snapshot.is_none()
-    }
-
-    /// OCI image pull policy.
-    #[must_use]
-    pub const fn pull_policy(&self) -> Option<PullPolicy> {
-        self.pull_policy
-    }
-
-    /// Snapshot artifact path or bare name to boot from (mutually exclusive
-    /// with an explicit image reference).
-    #[must_use]
-    pub fn snapshot(&self) -> Option<&str> {
-        self.snapshot.as_deref()
-    }
-}
-
-/// OCI image pull policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PullPolicy {
-    /// Use cached layers if complete, pull otherwise.
-    IfMissing,
-    /// Always fetch the manifest from the registry.
-    Always,
-    /// Never contact the registry; error if the image is not fully cached.
-    Never,
 }
 
 /// In-guest security profile.
@@ -396,40 +275,22 @@ pub enum SecurityProfile {
 }
 
 /// POSIX resource limit identifier.
+///
+/// Shrunk to the boxlite-native 5 (`max_open_files`, `max_file_size`,
+/// `max_processes`, `max_memory`, `max_cpu_time`). The other 11 rlimits have
+/// no boxlite knob and are rejected at the JSON/schema layer (V39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RlimitResource {
     /// Max CPU time in seconds (`RLIMIT_CPU`).
     Cpu,
     /// Max file size in bytes (`RLIMIT_FSIZE`).
     Fsize,
-    /// Max data segment size (`RLIMIT_DATA`).
-    Data,
-    /// Max stack size (`RLIMIT_STACK`).
-    Stack,
-    /// Max core file size (`RLIMIT_CORE`).
-    Core,
-    /// Max resident set size (`RLIMIT_RSS`).
-    Rss,
     /// Max number of processes (`RLIMIT_NPROC`).
     Nproc,
     /// Max open file descriptors (`RLIMIT_NOFILE`).
     Nofile,
-    /// Max locked memory (`RLIMIT_MEMLOCK`).
-    Memlock,
     /// Max address space size (`RLIMIT_AS`).
     As,
-    /// Max file locks (`RLIMIT_LOCKS`).
-    Locks,
-    /// Max pending signals (`RLIMIT_SIGPENDING`).
-    Sigpending,
-    /// Max bytes in POSIX message queues (`RLIMIT_MSGQUEUE`).
-    Msgqueue,
-    /// Max nice priority (`RLIMIT_NICE`).
-    Nice,
-    /// Max real-time priority (`RLIMIT_RTPRIO`).
-    Rtprio,
-    /// Max real-time timeout (`RLIMIT_RTTIME`).
-    Rttime,
 }
 
 /// A POSIX resource limit.
@@ -534,26 +395,6 @@ pub fn validate_microvm_policy(policy: &MicrovmPolicy) -> crate::Result<()> {
         ));
     }
 
-    if let Some(hostname) = policy.guest().hostname() {
-        if hostname.is_empty() {
-            return Err(crate::Error::InvalidMicrovmPolicy(
-                "guest.hostname must be non-empty".to_string(),
-            ));
-        }
-        if hostname.len() > MAX_HOSTNAME_BYTES {
-            return Err(crate::Error::InvalidMicrovmPolicy(format!(
-                "guest.hostname must be at most {MAX_HOSTNAME_BYTES} bytes"
-            )));
-        }
-    }
-    if let Some(init) = policy.guest().init()
-        && init.cmd().is_empty()
-    {
-        return Err(crate::Error::InvalidMicrovmPolicy(
-            "guest.init.cmd must be non-empty".to_string(),
-        ));
-    }
-
     for (index, secret) in policy.secrets().iter().enumerate() {
         if secret.env_var().is_empty() {
             return Err(crate::Error::InvalidMicrovmPolicy(format!(
@@ -590,7 +431,6 @@ mod tests {
             MicrovmLifecycle::default(),
             MicrovmGuest::default(),
             Vec::new(),
-            MicrovmImage::default(),
             None,
         )
     }
@@ -635,59 +475,12 @@ mod tests {
             MicrovmLifecycle::new(Some(0), None),
             MicrovmGuest::default(),
             Vec::new(),
-            MicrovmImage::default(),
             None,
         );
 
         let error = validate_microvm_policy(&policy).expect_err("zero maxDuration rejects");
 
         assert!(error.to_string().contains("maxDuration"));
-    }
-
-    #[test]
-    fn validates_long_hostname() {
-        let guest = MicrovmGuest::new(
-            None,
-            Some("x".repeat(MAX_HOSTNAME_BYTES + 1)),
-            None,
-            None,
-            None,
-        );
-        let policy = MicrovmPolicy::new(
-            MicrovmResources::default(),
-            MicrovmLifecycle::default(),
-            guest,
-            Vec::new(),
-            MicrovmImage::default(),
-            None,
-        );
-
-        let error = validate_microvm_policy(&policy).expect_err("long hostname rejects");
-
-        assert!(error.to_string().contains("hostname"));
-    }
-
-    #[test]
-    fn validates_empty_init_cmd() {
-        let guest = MicrovmGuest::new(
-            None,
-            None,
-            None,
-            None,
-            Some(MicrovmInit::new(String::new(), Vec::new(), Vec::new())),
-        );
-        let policy = MicrovmPolicy::new(
-            MicrovmResources::default(),
-            MicrovmLifecycle::default(),
-            guest,
-            Vec::new(),
-            MicrovmImage::default(),
-            None,
-        );
-
-        let error = validate_microvm_policy(&policy).expect_err("empty init cmd rejects");
-
-        assert!(error.to_string().contains("init.cmd"));
     }
 
     #[test]
@@ -698,7 +491,6 @@ mod tests {
             MicrovmLifecycle::default(),
             MicrovmGuest::default(),
             vec![secret],
-            MicrovmImage::default(),
             None,
         );
 
@@ -719,7 +511,6 @@ mod tests {
             MicrovmLifecycle::default(),
             MicrovmGuest::default(),
             vec![secret],
-            MicrovmImage::default(),
             None,
         );
 
@@ -733,9 +524,8 @@ mod tests {
         let policy = MicrovmPolicy::new(
             MicrovmResources::new(Some(2), Some(512), Some(256), Vec::new()),
             MicrovmLifecycle::new(Some(3600), None),
-            MicrovmGuest::new(Some("appuser".to_string()), None, None, None, None),
+            MicrovmGuest::new(Some("appuser".to_string()), None),
             Vec::new(),
-            MicrovmImage::new(Some(PullPolicy::Always), None),
             Some(SecurityProfile::Restricted),
         );
 

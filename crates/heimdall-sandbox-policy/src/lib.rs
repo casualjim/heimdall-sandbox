@@ -121,9 +121,8 @@ pub use filesystem::{
 };
 pub use materializer::FilesystemPolicyMaterializer;
 pub use microvm::{
-    MAX_HOSTNAME_BYTES, MicrovmGuest, MicrovmImage, MicrovmInit, MicrovmLifecycle, MicrovmPolicy,
-    MicrovmResources, MicrovmSecret, PullPolicy, RlimitResource, RlimitSpec, SecretHostPattern,
-    SecurityProfile, validate_microvm_policy,
+    MicrovmGuest, MicrovmLifecycle, MicrovmPolicy, MicrovmResources, MicrovmSecret, RlimitResource,
+    RlimitSpec, SecretHostPattern, SecurityProfile, validate_microvm_policy,
 };
 pub use paths::{ConcretePathState, concrete_path_state, home_dir};
 pub use runtime::{AgentPolicy, NetworkMode, ProcMode};

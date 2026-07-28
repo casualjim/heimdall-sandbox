@@ -13,10 +13,9 @@ mod signal;
 pub use error::{Error, SANDBOX_MISCONFIGURATION_EXIT_CODE};
 pub use executor::Executor;
 pub use heimdall_sandbox_policy::{
-    AgentPolicy, FilesystemPolicy, MicrovmGuest, MicrovmImage, MicrovmInit, MicrovmLifecycle,
-    MicrovmPolicy, MicrovmResources, MicrovmSecret, NetworkMode, ProcMode, PullPolicy,
-    RlimitResource, RlimitSpec, SecretHostPattern, SecurityProfile, validate_filesystem_policy,
-    validate_microvm_policy,
+    AgentPolicy, FilesystemPolicy, MicrovmGuest, MicrovmLifecycle, MicrovmPolicy, MicrovmResources,
+    MicrovmSecret, NetworkMode, ProcMode, RlimitResource, RlimitSpec, SecretHostPattern,
+    SecurityProfile, validate_filesystem_policy, validate_microvm_policy,
 };
 pub use request::{EnvPolicy, ExecRequest, RuntimeMode, StdioPolicy, validate_cwd};
 

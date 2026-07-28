@@ -53,7 +53,7 @@ impl MicrovmRequest<'_> {
     /// output forwarding fails.
     pub fn execute(&self) -> Result<i32> {
         self.validate_policy()?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(Error::Runtime)?;
@@ -70,56 +70,15 @@ impl MicrovmRequest<'_> {
                 "microvm runtime requires non-empty policy image",
             ));
         }
-        if policy.image().snapshot().is_some() {
-            return Err(Error::unsupported_policy(
-                "microvm runtime does not support image.snapshot on boxlite",
-            ));
-        }
-        if policy.image().pull_policy().is_some() {
-            return Err(Error::unsupported_policy(
-                "microvm runtime does not support image.pullPolicy on boxlite",
-            ));
-        }
         if policy.resources().upper_size_mib().is_some() {
             return Err(Error::unsupported_policy(
                 "microvm runtime does not support resources.upperSize on boxlite",
-            ));
-        }
-        if policy.guest().hostname().is_some() {
-            return Err(Error::unsupported_policy(
-                "microvm runtime does not support guest.hostname on boxlite",
-            ));
-        }
-        if policy.guest().shell().is_some() {
-            return Err(Error::unsupported_policy(
-                "microvm runtime does not support guest.shell on boxlite",
-            ));
-        }
-        if policy.guest().init().is_some() {
-            return Err(Error::unsupported_policy(
-                "microvm runtime does not support guest.init on boxlite",
             ));
         }
         if policy.lifecycle().idle_timeout_secs().is_some() {
             return Err(Error::unsupported_policy(
                 "microvm runtime does not support lifecycle.idleTimeout on boxlite",
             ));
-        }
-        for spec in policy.resources().rlimits() {
-            if !matches!(
-                spec.resource(),
-                RlimitResource::Nofile
-                    | RlimitResource::Fsize
-                    | RlimitResource::Nproc
-                    | RlimitResource::As
-                    | RlimitResource::Cpu
-            ) {
-                return Err(Error::unsupported_policy(format!(
-                    "microvm runtime does not support rlimit {:?} on boxlite \
-                     (supported: nofile, fsize, nproc, as, cpu)",
-                    spec.resource()
-                )));
-            }
         }
         if !policy.secrets().is_empty() {
             return Err(Error::unsupported_policy(
@@ -237,15 +196,6 @@ impl MicrovmRequest<'_> {
                     RlimitResource::Nproc => limits.max_processes = Some(spec.soft()),
                     RlimitResource::As => limits.max_memory = Some(spec.soft()),
                     RlimitResource::Cpu => limits.max_cpu_time = Some(spec.soft()),
-                    // Unreachable once validate_policy ran; return the same
-                    // error defensively rather than panicking.
-                    _ => {
-                        return Err(Error::unsupported_policy(format!(
-                            "microvm runtime does not support rlimit {:?} on boxlite \
-                             (supported: nofile, fsize, nproc, as, cpu)",
-                            spec.resource()
-                        )));
-                    }
                 }
             }
             advanced.security.resource_limits = limits;
@@ -329,8 +279,8 @@ mod tests {
     use std::path::PathBuf;
 
     use heimdall_sandbox_policy::{
-        MicrovmGuest, MicrovmImage, MicrovmLifecycle, MicrovmResources, MicrovmSecret, PullPolicy,
-        RlimitResource, RlimitSpec, SecretHostPattern,
+        MicrovmGuest, MicrovmLifecycle, MicrovmResources, MicrovmSecret, RlimitResource,
+        RlimitSpec, SecretHostPattern,
     };
 
     /// Run `validate_policy` for the given varying inputs. Common fields use
@@ -357,17 +307,6 @@ mod tests {
         request.validate_policy()
     }
 
-    fn policy_with_image(image: MicrovmImage) -> MicrovmPolicy {
-        MicrovmPolicy::new(
-            MicrovmResources::default(),
-            MicrovmLifecycle::default(),
-            MicrovmGuest::default(),
-            Vec::new(),
-            image,
-            None,
-        )
-    }
-
     #[test]
     fn rejects_empty_image() {
         let error = validate(
@@ -383,43 +322,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_snapshot() {
-        let policy = policy_with_image(MicrovmImage::new(None, Some("pinned".to_string())));
-        let error = validate(
-            Some("alpine"),
-            &policy,
-            &FilesystemPolicy::default(),
-            ProcMode::Default,
-            AgentPolicy::default(),
-        )
-        .expect_err("snapshot rejects");
-
-        assert!(error.to_string().contains("image.snapshot"));
-    }
-
-    #[test]
-    fn rejects_pull_policy() {
-        let policy = policy_with_image(MicrovmImage::new(Some(PullPolicy::Always), None));
-        let error = validate(
-            Some("alpine"),
-            &policy,
-            &FilesystemPolicy::default(),
-            ProcMode::Default,
-            AgentPolicy::default(),
-        )
-        .expect_err("pull policy rejects");
-
-        assert!(error.to_string().contains("image.pullPolicy"));
-    }
-
-    #[test]
     fn rejects_upper_size() {
         let policy = MicrovmPolicy::new(
             MicrovmResources::new(None, None, Some(256), Vec::new()),
             MicrovmLifecycle::default(),
             MicrovmGuest::default(),
             Vec::new(),
-            MicrovmImage::default(),
             None,
         );
         let error = validate(
@@ -435,34 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_rlimit() {
-        let policy = MicrovmPolicy::new(
-            MicrovmResources::new(
-                None,
-                None,
-                None,
-                vec![RlimitSpec::new(RlimitResource::Data, 1, 2)],
-            ),
-            MicrovmLifecycle::default(),
-            MicrovmGuest::default(),
-            Vec::new(),
-            MicrovmImage::default(),
-            None,
-        );
-        let error = validate(
-            Some("alpine"),
-            &policy,
-            &FilesystemPolicy::default(),
-            ProcMode::Default,
-            AgentPolicy::default(),
-        )
-        .expect_err("unsupported rlimit rejects");
-
-        assert!(error.to_string().contains("rlimit"));
-        assert!(error.to_string().contains("Data"));
-    }
-
-    #[test]
     fn accepts_supported_rlimit() {
         let policy = MicrovmPolicy::new(
             MicrovmResources::new(
@@ -474,7 +354,6 @@ mod tests {
             MicrovmLifecycle::default(),
             MicrovmGuest::default(),
             Vec::new(),
-            MicrovmImage::default(),
             None,
         );
         validate(
@@ -488,92 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_hostname() {
-        let guest = MicrovmGuest::new(None, Some("box".to_string()), None, None, None);
-        let policy = MicrovmPolicy::new(
-            MicrovmResources::default(),
-            MicrovmLifecycle::default(),
-            guest,
-            Vec::new(),
-            MicrovmImage::default(),
-            None,
-        );
-        let error = validate(
-            Some("alpine"),
-            &policy,
-            &FilesystemPolicy::default(),
-            ProcMode::Default,
-            AgentPolicy::default(),
-        )
-        .expect_err("hostname rejects");
-
-        assert!(error.to_string().contains("guest.hostname"));
-    }
-
-    #[test]
-    fn rejects_shell() {
-        let guest = MicrovmGuest::new(None, None, Some("/bin/sh".to_string()), None, None);
-        let policy = MicrovmPolicy::new(
-            MicrovmResources::default(),
-            MicrovmLifecycle::default(),
-            guest,
-            Vec::new(),
-            MicrovmImage::default(),
-            None,
-        );
-        let error = validate(
-            Some("alpine"),
-            &policy,
-            &FilesystemPolicy::default(),
-            ProcMode::Default,
-            AgentPolicy::default(),
-        )
-        .expect_err("shell rejects");
-
-        assert!(error.to_string().contains("guest.shell"));
-    }
-
-    #[test]
-    fn rejects_init() {
-        let guest = MicrovmGuest::new(
-            None,
-            None,
-            None,
-            None,
-            Some(heimdall_sandbox_policy::MicrovmInit::new(
-                "/sbin/init".to_string(),
-                Vec::new(),
-                Vec::new(),
-            )),
-        );
-        let policy = MicrovmPolicy::new(
-            MicrovmResources::default(),
-            MicrovmLifecycle::default(),
-            guest,
-            Vec::new(),
-            MicrovmImage::default(),
-            None,
-        );
-        let error = validate(
-            Some("alpine"),
-            &policy,
-            &FilesystemPolicy::default(),
-            ProcMode::Default,
-            AgentPolicy::default(),
-        )
-        .expect_err("init rejects");
-
-        assert!(error.to_string().contains("guest.init"));
-    }
-
-    #[test]
     fn rejects_idle_timeout() {
         let policy = MicrovmPolicy::new(
             MicrovmResources::default(),
             MicrovmLifecycle::new(None, Some(60)),
             MicrovmGuest::default(),
             Vec::new(),
-            MicrovmImage::default(),
             None,
         );
         let error = validate(
@@ -600,7 +399,6 @@ mod tests {
             MicrovmLifecycle::default(),
             MicrovmGuest::default(),
             vec![secret],
-            MicrovmImage::default(),
             None,
         );
         let error = validate(
