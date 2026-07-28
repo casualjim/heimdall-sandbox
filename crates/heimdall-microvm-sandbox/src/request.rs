@@ -1,26 +1,34 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
-use heimdall_sandbox_policy::{
-    AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, NetworkMode, ProcMode,
+use boxlite::runtime::options::VolumeSpec;
+use boxlite::{
+    AdvancedBoxOptions, BoxCommand, BoxOptions, BoxliteRuntime, ExecStderr, ExecStdout, LiteBox,
+    NetworkSpec, RootfsSpec,
 };
-use microsandbox::{ExecEvent, Sandbox};
+use futures::StreamExt;
+use heimdall_sandbox_policy::{
+    AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, MicrovmPolicy, NetworkMode,
+    ProcMode, RlimitResource,
+};
 
 use crate::environment::utf8_environment;
 use crate::filesystem::{FilesystemPlan, GUEST_WORKDIR, plan_filesystem};
 use crate::naming::sandbox_name;
-use crate::preflight::preflight_host;
 use crate::{Error, Result};
 
-/// Structured input used to run a command in a microsandbox microVM.
+/// Structured input used to run a command in a boxlite microVM.
 pub struct MicrovmRequest<'a> {
     /// Host working directory mounted into the guest.
     pub cwd: &'a Path,
     /// Child argv to run inside the guest.
     pub argv: &'a [String],
-    /// Microsandbox root filesystem image or local rootfs path.
-    pub image: &'a str,
+    /// Boxlite rootfs image reference (OCI image). Required for the `microvm`
+    /// runtime; boxlite has no snapshot-pinning knob, so a policy
+    /// `image.snapshot` is rejected.
+    pub image: Option<&'a str>,
     /// Child environment after Heimdall filtering/hardening.
     pub environment: &'a [(OsString, OsString)],
     /// Child network isolation policy.
@@ -31,18 +39,20 @@ pub struct MicrovmRequest<'a> {
     pub proc_mode: ProcMode,
     /// Host agent sockets explicitly enabled for access.
     pub agent_policy: AgentPolicy,
+    /// MicroVM-only resource, lifecycle, guest, secret, and image policy.
+    pub microvm_policy: &'a MicrovmPolicy,
 }
 
 impl MicrovmRequest<'_> {
-    /// Execute this request in an ephemeral attached microsandbox.
+    /// Execute this request in an ephemeral attached boxlite box.
     ///
     /// # Errors
     ///
-    /// Returns a sandbox misconfiguration when host preflight fails, policy cannot be represented,
-    /// microsandbox startup/exec/stop fails, or output forwarding fails.
+    /// Returns a sandbox misconfiguration when policy cannot be represented by
+    /// the boxlite backend, boxlite runtime creation/start/exec/stop fails, or
+    /// output forwarding fails.
     pub fn execute(&self) -> Result<i32> {
         self.validate_policy()?;
-        preflight_host()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -50,20 +60,85 @@ impl MicrovmRequest<'_> {
         runtime.block_on(self.execute_async())
     }
 
+    /// Reject every `MicrovmPolicy`/filesystem/proc/agent surface that boxlite
+    /// has no native knob for. Fail closed — never silently drop a field.
     fn validate_policy(&self) -> Result<()> {
-        if self.image.is_empty() {
+        let policy = self.microvm_policy;
+
+        if self.image.map(str::is_empty).unwrap_or(true) {
             return Err(Error::unsupported_policy(
                 "microvm runtime requires non-empty policy image",
             ));
         }
+        if policy.image().snapshot().is_some() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not support image.snapshot on boxlite",
+            ));
+        }
+        if policy.image().pull_policy().is_some() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not support image.pullPolicy on boxlite",
+            ));
+        }
+        if policy.resources().upper_size_mib().is_some() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not support resources.upperSize on boxlite",
+            ));
+        }
+        if policy.guest().hostname().is_some() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not support guest.hostname on boxlite",
+            ));
+        }
+        if policy.guest().shell().is_some() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not support guest.shell on boxlite",
+            ));
+        }
+        if policy.guest().init().is_some() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not support guest.init on boxlite",
+            ));
+        }
+        if policy.lifecycle().idle_timeout_secs().is_some() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not support lifecycle.idleTimeout on boxlite",
+            ));
+        }
+        for spec in policy.resources().rlimits() {
+            if !matches!(
+                spec.resource(),
+                RlimitResource::Nofile
+                    | RlimitResource::Fsize
+                    | RlimitResource::Nproc
+                    | RlimitResource::As
+                    | RlimitResource::Cpu
+            ) {
+                return Err(Error::unsupported_policy(format!(
+                    "microvm runtime does not support rlimit {:?} on boxlite \
+                     (supported: nofile, fsize, nproc, as, cpu)",
+                    spec.resource()
+                )));
+            }
+        }
+        if !policy.secrets().is_empty() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not yet map secrets to boxlite Secret",
+            ));
+        }
+        if !self.filesystem_policy.virtual_files().is_empty() {
+            return Err(Error::unsupported_policy(
+                "microvm runtime does not yet materialize filesystem.virtual files on boxlite",
+            ));
+        }
         if self.proc_mode != ProcMode::Default {
             return Err(Error::unsupported_policy(
-                "microvm runtime does not yet support proc=none parity",
+                "microvm runtime does not yet support proc=none parity on boxlite",
             ));
         }
         if !self.agent_policy.is_empty() {
             return Err(Error::unsupported_policy(
-                "microvm runtime does not yet support agent socket parity",
+                "microvm runtime does not yet support agent socket parity on boxlite",
             ));
         }
         Ok(())
@@ -79,22 +154,14 @@ impl MicrovmRequest<'_> {
             .map_err(Error::from)?;
         let plan = plan_filesystem(&cwd, &materialized, self.filesystem_policy.virtual_files())?;
         let environment = utf8_environment(self.environment)?;
-        let builder = Sandbox::builder(sandbox_name()?)
-            .image(self.image)
-            .ephemeral(true);
-        // Add filesystem mounts before setting the workdir: the workdir points at
-        // /workspace, which the workspace bind mount creates in the guest. The
-        // SDK validates the workdir exists after start, so the mount must be in
-        // the config first (mirrors `msb run --mount-dir ... -w /workspace`).
-        let builder = Self::apply_filesystem_plan(builder, &plan);
-        let mut builder = builder.workdir(GUEST_WORKDIR).envs(environment);
-        if self.network_mode == NetworkMode::None {
-            builder = builder.disable_network();
-        }
 
-        let sandbox = builder.create().await?;
-        let exec_result = self.execute_command(&sandbox).await;
-        let stop_result = sandbox.stop_and_wait().await.map_err(Error::from);
+        let runtime = BoxliteRuntime::with_defaults().map_err(Error::from)?;
+        let litebox = runtime
+            .create(self.build_box_options(&plan)?, Some(sandbox_name()?))
+            .await
+            .map_err(Error::from)?;
+        let exec_result = self.execute_command(&litebox, &environment).await;
+        let stop_result = litebox.stop().await.map_err(Error::from);
         match (exec_result, stop_result) {
             (Ok(exit_code), Ok(_)) => Ok(exit_code),
             (Err(error), Ok(_)) | (Err(error), Err(_)) => Err(error),
@@ -102,94 +169,505 @@ impl MicrovmRequest<'_> {
         }
     }
 
-    fn apply_filesystem_plan(
-        mut builder: microsandbox::sandbox::SandboxBuilder,
-        plan: &FilesystemPlan,
-    ) -> microsandbox::sandbox::SandboxBuilder {
-        for volume in &plan.volumes {
-            let host = volume.host.clone();
-            let readonly = volume.readonly;
-            builder = builder.volume(volume.guest.clone(), move |mount| {
-                let mount = mount.bind(host);
-                if readonly { mount.readonly() } else { mount }
-            });
-        }
-        if !plan.virtual_files.is_empty() {
-            builder = builder.patch(|mut patches| {
-                for file in &plan.virtual_files {
-                    patches = patches.text(file.guest.clone(), file.content.clone(), None, true);
-                }
-                patches
-            });
-        }
-        builder
+    /// Translate the validated policy + filesystem plan into a boxlite
+    /// [`BoxOptions`]. Only boxlite-native knobs are set; everything rejected
+    /// by `validate_policy` is absent here.
+    fn build_box_options(&self, plan: &FilesystemPlan) -> Result<BoxOptions> {
+        let policy = self.microvm_policy;
+        let resources = policy.resources();
+        let image = self
+            .image
+            .filter(|image| !image.is_empty())
+            .ok_or_else(|| {
+                Error::unsupported_policy("microvm runtime requires non-empty policy image")
+            })?;
+        let volumes: Vec<VolumeSpec> = plan
+            .volumes
+            .iter()
+            .map(|volume| VolumeSpec {
+                host_path: volume.host.to_string_lossy().into_owned(),
+                guest_path: volume.guest.clone(),
+                read_only: volume.readonly,
+            })
+            .collect();
+        let network = match self.network_mode {
+            NetworkMode::Host => NetworkSpec::Enabled {
+                allow_net: Vec::new(),
+            },
+            NetworkMode::None => NetworkSpec::Disabled,
+        };
+        Ok(BoxOptions {
+            rootfs: RootfsSpec::Image(image.to_string()),
+            working_dir: Some(GUEST_WORKDIR.to_string()),
+            env: Vec::new(),
+            volumes,
+            network,
+            auto_remove: true,
+            detach: false,
+            cpus: resources.cpus(),
+            memory_mib: resources.memory_mib(),
+            entrypoint: policy
+                .guest()
+                .entrypoint()
+                .map(|entrypoint| entrypoint.to_vec()),
+            user: policy.guest().user().map(String::from),
+            secrets: Vec::new(),
+            advanced: self.build_advanced()?,
+            ..Default::default()
+        })
     }
 
-    async fn execute_command(&self, sandbox: &Sandbox) -> Result<i32> {
+    /// Build boxlite advanced options: resource limits (the 5 boxlite-native
+    /// rlimits) on top of boxlite's secure default [`AdvancedBoxOptions`].
+    /// `security_profile` has no separate boxlite knob — boxlite's default
+    /// `SecurityOptions` is the fully-enabled (jail) profile, which satisfies
+    /// both Heimdall `Default` and `Restricted`; the finer `no_new_privs` /
+    /// `CAP_SYS_ADMIN` distinction is not expressible and left to boxlite's
+    /// secure default.
+    fn build_advanced(&self) -> Result<AdvancedBoxOptions> {
+        let policy = self.microvm_policy;
+        let mut advanced = AdvancedBoxOptions::default();
+        let rlimits = policy.resources().rlimits();
+        if !rlimits.is_empty() {
+            let mut limits = advanced.security.resource_limits.clone();
+            for spec in rlimits {
+                match spec.resource() {
+                    RlimitResource::Nofile => limits.max_open_files = Some(spec.soft()),
+                    RlimitResource::Fsize => limits.max_file_size = Some(spec.soft()),
+                    RlimitResource::Nproc => limits.max_processes = Some(spec.soft()),
+                    RlimitResource::As => limits.max_memory = Some(spec.soft()),
+                    RlimitResource::Cpu => limits.max_cpu_time = Some(spec.soft()),
+                    // Unreachable once validate_policy ran; return the same
+                    // error defensively rather than panicking.
+                    _ => {
+                        return Err(Error::unsupported_policy(format!(
+                            "microvm runtime does not support rlimit {:?} on boxlite \
+                             (supported: nofile, fsize, nproc, as, cpu)",
+                            spec.resource()
+                        )));
+                    }
+                }
+            }
+            advanced.security.resource_limits = limits;
+        }
+        Ok(advanced)
+    }
+
+    async fn execute_command(
+        &self,
+        litebox: &LiteBox,
+        environment: &[(String, String)],
+    ) -> Result<i32> {
         let (program, args) = self
             .argv
             .split_first()
             .ok_or_else(|| Error::unsupported_policy("microvm runtime requires command argv"))?;
-        let mut handle = sandbox.exec_stream(program, args.iter().cloned()).await?;
-        while let Some(event) = handle.recv().await {
-            match event {
-                ExecEvent::Started { pid: _ } => {}
-                ExecEvent::Stdout(bytes) => {
-                    std::io::stdout().write_all(&bytes).map_err(Error::Output)?;
-                }
-                ExecEvent::Stderr(bytes) => {
-                    std::io::stderr().write_all(&bytes).map_err(Error::Output)?;
-                }
-                ExecEvent::Exited { code } => return Ok(code),
-                ExecEvent::Failed(payload) => {
-                    return Err(microsandbox::MicrosandboxError::ExecFailed(payload).into());
-                }
-                ExecEvent::StdinError(_) => {}
-            }
+        let mut command = BoxCommand::new(program.as_str())
+            .args(args.iter().cloned())
+            .working_dir(GUEST_WORKDIR);
+        for (key, value) in environment {
+            command = command.env(key.as_str(), value.as_str());
         }
-        Err(Error::platform("microvm exec ended without exit event"))
+        if let Some(secs) = self.microvm_policy.lifecycle().max_duration_secs() {
+            command = command.timeout(Duration::from_secs(secs));
+        }
+
+        let mut execution = litebox.exec(command).await.map_err(Error::from)?;
+        let mut stdout = execution.stdout();
+        let mut stderr = execution.stderr();
+        let (stdout_res, stderr_res, wait_res) = futures::join!(
+            drain_stdout(stdout.as_mut()),
+            drain_stderr(stderr.as_mut()),
+            execution.wait(),
+        );
+        stdout_res?;
+        stderr_res?;
+        let result = wait_res.map_err(Error::from)?;
+        Ok(map_exit_code(result.exit_code))
     }
+}
+
+/// Forward boxlite stdout chunks to the host stdout stream.
+async fn drain_stdout(stream: Option<&mut ExecStdout>) -> Result<()> {
+    let Some(stream) = stream else {
+        return Ok(());
+    };
+    while let Some(chunk) = stream.next().await {
+        std::io::stdout()
+            .write_all(chunk.as_bytes())
+            .map_err(Error::Output)?;
+    }
+    Ok(())
+}
+
+/// Forward boxlite stderr chunks to the host stderr stream.
+async fn drain_stderr(stream: Option<&mut ExecStderr>) -> Result<()> {
+    let Some(stream) = stream else {
+        return Ok(());
+    };
+    while let Some(chunk) = stream.next().await {
+        std::io::stderr()
+            .write_all(chunk.as_bytes())
+            .map_err(Error::Output)?;
+    }
+    Ok(())
+}
+
+/// Map a boxlite exit code to a Heimdall exit code.
+///
+/// boxlite reports a process killed by Unix signal `n` as a negative exit code
+/// (`-n`). Heimdall preserves normal exit codes and maps signal termination to
+/// `128 + n` (V10).
+fn map_exit_code(code: i32) -> i32 {
+    if code < 0 { 128 + (-code) } else { code }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use heimdall_sandbox_policy::{
+        MicrovmGuest, MicrovmImage, MicrovmLifecycle, MicrovmResources, MicrovmSecret, PullPolicy,
+        RlimitResource, RlimitSpec, SecretHostPattern,
+    };
+
+    /// Run `validate_policy` for the given varying inputs. Common fields use
+    /// safe defaults; the argv/cwd stay local so no borrow escapes.
+    fn validate(
+        image: Option<&str>,
+        microvm_policy: &MicrovmPolicy,
+        filesystem_policy: &FilesystemPolicy,
+        proc_mode: ProcMode,
+        agent_policy: AgentPolicy,
+    ) -> Result<()> {
+        let argv = ["true".to_string()];
+        let request = MicrovmRequest {
+            cwd: Path::new("."),
+            argv: &argv,
+            image,
+            environment: &[],
+            network_mode: NetworkMode::Host,
+            filesystem_policy,
+            proc_mode,
+            agent_policy,
+            microvm_policy,
+        };
+        request.validate_policy()
+    }
+
+    fn policy_with_image(image: MicrovmImage) -> MicrovmPolicy {
+        MicrovmPolicy::new(
+            MicrovmResources::default(),
+            MicrovmLifecycle::default(),
+            MicrovmGuest::default(),
+            Vec::new(),
+            image,
+            None,
+        )
+    }
 
     #[test]
     fn rejects_empty_image() {
-        let policy = FilesystemPolicy::default();
-        let request = MicrovmRequest {
-            cwd: Path::new("."),
-            argv: &["true".to_string()],
-            image: "",
-            environment: &[],
-            network_mode: NetworkMode::Host,
-            filesystem_policy: &policy,
-            proc_mode: ProcMode::Default,
-            agent_policy: AgentPolicy::default(),
-        };
-
-        let error = request.validate_policy().expect_err("empty image rejects");
+        let error = validate(
+            None,
+            &MicrovmPolicy::default(),
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("empty image rejects");
 
         assert!(error.to_string().contains("non-empty policy image"));
     }
 
     #[test]
+    fn rejects_snapshot() {
+        let policy = policy_with_image(MicrovmImage::new(None, Some("pinned".to_string())));
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("snapshot rejects");
+
+        assert!(error.to_string().contains("image.snapshot"));
+    }
+
+    #[test]
+    fn rejects_pull_policy() {
+        let policy = policy_with_image(MicrovmImage::new(Some(PullPolicy::Always), None));
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("pull policy rejects");
+
+        assert!(error.to_string().contains("image.pullPolicy"));
+    }
+
+    #[test]
+    fn rejects_upper_size() {
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::new(None, None, Some(256), Vec::new()),
+            MicrovmLifecycle::default(),
+            MicrovmGuest::default(),
+            Vec::new(),
+            MicrovmImage::default(),
+            None,
+        );
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("upper size rejects");
+
+        assert!(error.to_string().contains("resources.upperSize"));
+    }
+
+    #[test]
+    fn rejects_unsupported_rlimit() {
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::new(
+                None,
+                None,
+                None,
+                vec![RlimitSpec::new(RlimitResource::Data, 1, 2)],
+            ),
+            MicrovmLifecycle::default(),
+            MicrovmGuest::default(),
+            Vec::new(),
+            MicrovmImage::default(),
+            None,
+        );
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("unsupported rlimit rejects");
+
+        assert!(error.to_string().contains("rlimit"));
+        assert!(error.to_string().contains("Data"));
+    }
+
+    #[test]
+    fn accepts_supported_rlimit() {
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::new(
+                None,
+                None,
+                None,
+                vec![RlimitSpec::new(RlimitResource::Nofile, 1024, 1024)],
+            ),
+            MicrovmLifecycle::default(),
+            MicrovmGuest::default(),
+            Vec::new(),
+            MicrovmImage::default(),
+            None,
+        );
+        validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect("supported rlimit validates");
+    }
+
+    #[test]
+    fn rejects_hostname() {
+        let guest = MicrovmGuest::new(None, Some("box".to_string()), None, None, None);
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::default(),
+            MicrovmLifecycle::default(),
+            guest,
+            Vec::new(),
+            MicrovmImage::default(),
+            None,
+        );
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("hostname rejects");
+
+        assert!(error.to_string().contains("guest.hostname"));
+    }
+
+    #[test]
+    fn rejects_shell() {
+        let guest = MicrovmGuest::new(None, None, Some("/bin/sh".to_string()), None, None);
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::default(),
+            MicrovmLifecycle::default(),
+            guest,
+            Vec::new(),
+            MicrovmImage::default(),
+            None,
+        );
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("shell rejects");
+
+        assert!(error.to_string().contains("guest.shell"));
+    }
+
+    #[test]
+    fn rejects_init() {
+        let guest = MicrovmGuest::new(
+            None,
+            None,
+            None,
+            None,
+            Some(heimdall_sandbox_policy::MicrovmInit::new(
+                "/sbin/init".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )),
+        );
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::default(),
+            MicrovmLifecycle::default(),
+            guest,
+            Vec::new(),
+            MicrovmImage::default(),
+            None,
+        );
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("init rejects");
+
+        assert!(error.to_string().contains("guest.init"));
+    }
+
+    #[test]
+    fn rejects_idle_timeout() {
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::default(),
+            MicrovmLifecycle::new(None, Some(60)),
+            MicrovmGuest::default(),
+            Vec::new(),
+            MicrovmImage::default(),
+            None,
+        );
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("idle timeout rejects");
+
+        assert!(error.to_string().contains("lifecycle.idleTimeout"));
+    }
+
+    #[test]
+    fn rejects_secrets() {
+        let secret = MicrovmSecret::new(
+            "API_KEY".to_string(),
+            "sk-...".to_string(),
+            vec![SecretHostPattern::Exact("api.openai.com".to_string())],
+        );
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::default(),
+            MicrovmLifecycle::default(),
+            MicrovmGuest::default(),
+            vec![secret],
+            MicrovmImage::default(),
+            None,
+        );
+        let error = validate(
+            Some("alpine"),
+            &policy,
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("secrets reject");
+
+        assert!(error.to_string().contains("secrets"));
+    }
+
+    #[test]
+    fn rejects_virtual_files() {
+        let mut virtual_files = BTreeMap::new();
+        virtual_files.insert(
+            PathBuf::from("/etc/heimdall-virtual"),
+            "redacted".to_string(),
+        );
+        let filesystem_policy = FilesystemPolicy::new(Vec::new(), Vec::new(), virtual_files);
+        let error = validate(
+            Some("alpine"),
+            &MicrovmPolicy::default(),
+            &filesystem_policy,
+            ProcMode::Default,
+            AgentPolicy::default(),
+        )
+        .expect_err("virtual files reject");
+
+        assert!(error.to_string().contains("filesystem.virtual"));
+    }
+
+    #[test]
     fn rejects_proc_none() {
-        let policy = FilesystemPolicy::default();
-        let request = MicrovmRequest {
-            cwd: Path::new("."),
-            argv: &["true".to_string()],
-            image: "alpine",
-            environment: &[],
-            network_mode: NetworkMode::Host,
-            filesystem_policy: &policy,
-            proc_mode: ProcMode::Disabled,
-            agent_policy: AgentPolicy::default(),
-        };
+        let error = validate(
+            Some("alpine"),
+            &MicrovmPolicy::default(),
+            &FilesystemPolicy::default(),
+            ProcMode::Disabled,
+            AgentPolicy::default(),
+        )
+        .expect_err("proc none rejects");
 
-        let error = request.validate_policy().expect_err("proc none rejects");
+        assert!(error.to_string().contains("proc=none"));
+    }
 
-        assert!(error.to_string().contains("proc=none parity"));
+    #[test]
+    fn rejects_agent_policy() {
+        let error = validate(
+            Some("alpine"),
+            &MicrovmPolicy::default(),
+            &FilesystemPolicy::default(),
+            ProcMode::Default,
+            AgentPolicy::new(true, false, false),
+        )
+        .expect_err("agent policy rejects");
+
+        assert!(error.to_string().contains("agent socket"));
+    }
+
+    #[test]
+    fn maps_signal_exit_code() {
+        assert_eq!(map_exit_code(0), 0);
+        assert_eq!(map_exit_code(42), 42);
+        // SIGTERM (15) -> 128 + 15.
+        assert_eq!(map_exit_code(-15), 143);
     }
 }

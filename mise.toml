@@ -16,7 +16,7 @@ rust = "latest"
 shellcheck = "latest"
 sops = "latest"
 taplo = "latest"
-"ubi:orhun/git-cliff" = "latest"
+"github:orhun/git-cliff" = "latest"
 node = "lts"
 
 

@@ -28,8 +28,10 @@ sign-tag = false
 tag-message = "chore: release version {{version}}"
 
 [workspace.dependencies]
+boxlite = "0.9.7"
 clap = { version = "4.5.51", features = ["derive"] }
 dirs = "6"
+futures = "0.3"
 heimdall-core = { version = "0.1.43", path = "crates/heimdall-core" }
 heimdall-linux-sandbox = { version = "0.1.43", path = "crates/heimdall-linux-sandbox" }
 heimdall-macos-sandbox = { version = "0.1.43", path = "crates/heimdall-macos-sandbox" }

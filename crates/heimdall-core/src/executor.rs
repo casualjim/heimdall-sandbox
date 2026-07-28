@@ -54,6 +54,12 @@ impl Executor {
             }
         }
 
+        // The platform runtime cannot honor microvm-only controls (resource
+        // limits, lifecycle, guest identity, secrets, image pull/snapshot). Warn
+        // loudly so a policy written for the microvm runtime is not silently
+        // downgraded when run on the platform runtime.
+        crate::executor_warn::warn_ignored_microvm_controls(request);
+
         if request.needs_isolation() {
             #[cfg(target_os = "linux")]
             {
@@ -153,14 +159,13 @@ impl Executor {
         MicrovmRequest {
             cwd: request.cwd(),
             argv: request.argv(),
-            image: request.microvm_image().ok_or_else(|| {
-                Error::sandbox_misconfiguration("microvm runtime requires non-empty policy image")
-            })?,
+            image: request.microvm_image(),
             environment: &child_environment,
             network_mode: request.network_mode(),
             filesystem_policy: request.filesystem_policy(),
             proc_mode: request.proc_mode(),
             agent_policy: request.agent_policy(),
+            microvm_policy: request.microvm_policy(),
         }
         .execute()
         .map_err(Error::from)

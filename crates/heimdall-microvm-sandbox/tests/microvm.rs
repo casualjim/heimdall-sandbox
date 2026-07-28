@@ -1,8 +1,9 @@
-//! microVM integration tests that boot a real microsandbox via `msb` + libkrun.
+//! microVM integration tests that boot a real boxlite microVM.
 //!
 //! These tests are `#[ignore]` because they require a KVM-capable Linux host
-//! (or aarch64 macOS Hypervisor.framework) with `msb` and `libkrunfw` installed.
-//! Run them opt-in via the `microvm` nextest profile:
+//! (or aarch64 macOS Hypervisor.framework). The boxlite runtime is embedded
+//! (build-time fetch), so no host preinstall is needed — only the virtualization
+//! backend. Run them opt-in via the `microvm` nextest profile:
 //!
 //! ```sh
 //! mise run test:microvm
@@ -21,9 +22,13 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use boxlite::runtime::options::VolumeSpec;
+use boxlite::{BoxCommand, BoxOptions, BoxliteRuntime, RootfsSpec};
+use futures::StreamExt;
 use heimdall_microvm_sandbox::MicrovmRequest;
-use heimdall_sandbox_policy::{AgentPolicy, FilesystemPolicy, NetworkMode, ProcMode};
-use microsandbox::Sandbox;
+use heimdall_sandbox_policy::{
+    AgentPolicy, FilesystemPolicy, MicrovmPolicy, NetworkMode, ProcMode,
+};
 
 fn unique_dir(name: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -43,11 +48,10 @@ fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{stamp}")
 }
 
-/// Minimal direct-SDK check: bind the host cwd at `/workspace`, set the guest
-/// workdir to `/workspace`, run a command, and confirm the artifact lands on
-/// the host. Bypasses heimdall's `MicrovmRequest`/plan layer to isolate whether
-/// the bare SDK call pattern works (mirrors `msb run --mount-dir $PWD:/workspace
-/// -w /workspace alpine -- sh -c '...'`).
+/// Minimal direct-SDK check: create a boxlite box with the host cwd bound at
+/// `/workspace`, run a command, and confirm the artifact lands on the host.
+/// Bypasses heimdall's `MicrovmRequest`/plan layer to isolate whether the bare
+/// boxlite call pattern works.
 #[test]
 #[ignore]
 fn minimal_workspace_bindmount_and_workdir() {
@@ -59,30 +63,66 @@ fn minimal_workspace_bindmount_and_workdir() {
         .build()
         .expect("tokio runtime builds");
 
-    let output = runtime.block_on(async {
-        let sandbox = Sandbox::builder(unique_name("heimdall-minimal"))
-            .image("alpine")
-            .ephemeral(true)
-            .volume("/workspace", move |m| m.bind(host))
-            .workdir("/workspace")
-            .create()
+    let result = runtime.block_on(async {
+        let runtime = BoxliteRuntime::with_defaults().expect("boxlite runtime creates");
+        let litebox = runtime
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    working_dir: Some("/workspace".into()),
+                    volumes: vec![VolumeSpec {
+                        host_path: host.to_string_lossy().into_owned(),
+                        guest_path: "/workspace".into(),
+                        read_only: false,
+                    }],
+                    auto_remove: true,
+                    detach: false,
+                    ..Default::default()
+                },
+                Some(unique_name("heimdall-minimal")),
+            )
             .await
-            .expect("sandbox creates");
+            .expect("box creates");
 
-        let output = sandbox
-            .exec("sh", ["-c", "printf hello > out.txt"])
+        let mut execution = litebox
+            .exec(
+                BoxCommand::new("sh")
+                    .args(["-c", "printf hello > out.txt"])
+                    .working_dir("/workspace"),
+            )
             .await
             .expect("exec runs");
 
-        sandbox.stop().await.ok();
-        output
+        // Drain output concurrently with completion so unbounded streams do not
+        // buffer the whole run before the box stops.
+        let mut stdout = execution.stdout();
+        let mut stderr = execution.stderr();
+        let (stdout_res, stderr_res, wait_res) = futures::join!(
+            async {
+                let Some(stdout) = stdout.as_mut() else {
+                    return Ok(());
+                };
+                while stdout.next().await.is_some() {}
+                Ok::<(), std::io::Error>(())
+            },
+            async {
+                let Some(stderr) = stderr.as_mut() else {
+                    return Ok(());
+                };
+                while stderr.next().await.is_some() {}
+                Ok::<(), std::io::Error>(())
+            },
+            execution.wait(),
+        );
+        stdout_res.expect("stdout drains");
+        stderr_res.expect("stderr drains");
+        let result = wait_res.expect("exec completes");
+
+        litebox.stop().await.ok();
+        result
     });
 
-    assert!(
-        output.status().success,
-        "guest exec failed: {:?}",
-        output.status(),
-    );
+    assert!(result.success(), "guest exec failed: {result:?}",);
     assert_eq!(
         std::fs::read_to_string(cwd.join("out.txt")).expect("guest artifact is readable on host"),
         "hello",
@@ -91,8 +131,8 @@ fn minimal_workspace_bindmount_and_workdir() {
     std::fs::remove_dir_all(cwd).ok();
 }
 
-/// Exercise heimdall's `MicrovmRequest` (the production path: `plan_filesystem` +
-/// `apply_filesystem_plan` + `execute`). Uses the simplest policy that grants
+/// Exercise heimdall's `MicrovmRequest` (the production path: `plan_filesystem`,
+/// `build_box_options`, and `execute`). Uses the simplest policy that grants
 /// the workspace writable, then confirms the guest writes back to the host.
 #[test]
 #[ignore]
@@ -105,15 +145,17 @@ fn microvm_request_writes_to_mounted_workspace() {
         "-c".to_string(),
         "printf hello > out.txt".to_string(),
     ];
+    let microvm_policy = MicrovmPolicy::default();
     let request = MicrovmRequest {
         cwd: &cwd,
         argv: &argv,
-        image: "alpine",
+        image: Some("alpine:latest"),
         environment: &[],
         network_mode: NetworkMode::Host,
         filesystem_policy: &filesystem_policy,
         proc_mode: ProcMode::Default,
         agent_policy: AgentPolicy::default(),
+        microvm_policy: &microvm_policy,
     };
 
     let exit = request

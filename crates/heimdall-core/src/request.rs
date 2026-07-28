@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use heimdall_sandbox_policy::{
-    AgentPolicy, FilesystemPolicy, NetworkMode, ProcMode, validate_filesystem_policy,
+    AgentPolicy, FilesystemPolicy, MicrovmPolicy, NetworkMode, ProcMode,
+    validate_filesystem_policy, validate_microvm_policy,
 };
 
 use crate::{Error, Result};
@@ -123,6 +124,7 @@ pub struct ExecRequest {
     filesystem_policy: FilesystemPolicy,
     proc_mode: ProcMode,
     agent_policy: AgentPolicy,
+    microvm_policy: MicrovmPolicy,
 }
 
 impl ExecRequest {
@@ -155,6 +157,7 @@ impl ExecRequest {
             filesystem_policy: FilesystemPolicy::default(),
             proc_mode: ProcMode::Default,
             agent_policy: AgentPolicy::default(),
+            microvm_policy: MicrovmPolicy::default(),
         })
     }
 
@@ -226,6 +229,15 @@ impl ExecRequest {
     pub const fn with_agent_policy(mut self, agent_policy: AgentPolicy) -> Self {
         self.agent_policy = agent_policy;
         self
+    }
+
+    /// Set the microVM-only policy.
+    ///
+    /// Returns an error when microvm policy validation fails.
+    pub fn with_microvm_policy(mut self, microvm_policy: MicrovmPolicy) -> Result<Self> {
+        validate_microvm_policy(&microvm_policy)?;
+        self.microvm_policy = microvm_policy;
+        Ok(self)
     }
 
     /// Whether this request needs OS-level isolation.
@@ -309,6 +321,12 @@ impl ExecRequest {
     #[must_use]
     pub const fn agent_policy(&self) -> AgentPolicy {
         self.agent_policy
+    }
+
+    /// MicroVM-only sandbox policy.
+    #[must_use]
+    pub const fn microvm_policy(&self) -> &MicrovmPolicy {
+        &self.microvm_policy
     }
 }
 

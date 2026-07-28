@@ -1,5 +1,5 @@
 [package]
-description = "Microsandbox microVM backend for Heimdall sandbox execution."
+description = "Boxlite microVM backend for Heimdall sandbox execution."
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true
@@ -9,7 +9,8 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+boxlite = { workspace = true, features = ["gvproxy"] }
+futures.workspace = true
 heimdall-sandbox-policy.workspace = true
-microsandbox.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

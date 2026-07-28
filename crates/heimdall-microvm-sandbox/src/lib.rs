@@ -1,9 +1,8 @@
-//! Microsandbox microVM sandbox execution backend.
+//! Boxlite microVM sandbox execution backend.
 
 mod environment;
 mod filesystem;
 mod naming;
-mod preflight;
 mod request;
 
 use std::path::PathBuf;
@@ -30,9 +29,9 @@ pub enum Error {
         /// Description of platform/dependency misconfiguration.
         message: String,
     },
-    /// Microsandbox SDK operation failed.
-    #[error("sandbox misconfiguration: microsandbox failed: {0}")]
-    Microsandbox(#[source] microsandbox::MicrosandboxError),
+    /// Boxlite SDK operation failed.
+    #[error("sandbox misconfiguration: boxlite failed: {0}")]
+    Boxlite(#[source] boxlite::BoxliteError),
     /// Filesystem policy materialization failed.
     #[error("sandbox misconfiguration: {0}")]
     SandboxPolicy(#[source] heimdall_sandbox_policy::Error),
@@ -82,9 +81,9 @@ impl Error {
     }
 }
 
-impl From<microsandbox::MicrosandboxError> for Error {
-    fn from(error: microsandbox::MicrosandboxError) -> Self {
-        Self::Microsandbox(error)
+impl From<boxlite::BoxliteError> for Error {
+    fn from(error: boxlite::BoxliteError) -> Self {
+        Self::Boxlite(error)
     }
 }
 

@@ -2,6 +2,7 @@
 
 mod filesystem;
 mod materializer;
+mod microvm;
 mod paths;
 mod runtime;
 
@@ -109,6 +110,9 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    /// MicroVM policy is malformed or out of bounds.
+    #[error("invalid microvm policy: {0}")]
+    InvalidMicrovmPolicy(String),
 }
 
 pub use filesystem::{
@@ -116,5 +120,10 @@ pub use filesystem::{
     validate_patterns,
 };
 pub use materializer::FilesystemPolicyMaterializer;
+pub use microvm::{
+    MAX_HOSTNAME_BYTES, MicrovmGuest, MicrovmImage, MicrovmInit, MicrovmLifecycle, MicrovmPolicy,
+    MicrovmResources, MicrovmSecret, PullPolicy, RlimitResource, RlimitSpec, SecretHostPattern,
+    SecurityProfile, validate_microvm_policy,
+};
 pub use paths::{ConcretePathState, concrete_path_state, home_dir};
 pub use runtime::{AgentPolicy, NetworkMode, ProcMode};

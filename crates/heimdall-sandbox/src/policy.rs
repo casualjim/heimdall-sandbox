@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 use heimdall_core::{
-    AgentPolicy, EnvPolicy, ExecRequest, FilesystemPolicy, NetworkMode, ProcMode, RuntimeMode,
+    AgentPolicy, EnvPolicy, ExecRequest, FilesystemPolicy, MicrovmGuest, MicrovmImage, MicrovmInit,
+    MicrovmLifecycle, MicrovmPolicy, MicrovmResources, MicrovmSecret, NetworkMode, ProcMode,
+    PullPolicy, RlimitResource, RlimitSpec, RuntimeMode, SecretHostPattern, SecurityProfile,
     StdioPolicy,
 };
 use schemars::JsonSchema;
@@ -113,6 +115,8 @@ pub struct SandboxConfig {
     /// Allow age-compatible agent sockets when OS isolation is used.
     #[serde(rename = "ageAgent")]
     pub(crate) age_agent: Option<bool>,
+    /// MicroVM-only policy. Applies only when `runtime` is `microvm`.
+    pub(crate) microvm: Option<PolicyMicrovm>,
 }
 
 /// Network isolation mode in a [`PolicyDocument`].
@@ -149,6 +153,153 @@ pub struct PolicyFilesystem {
 pub struct PolicyEnvironment {
     pub(crate) allow: Option<Vec<String>>,
     pub(crate) deny: Option<Vec<String>>,
+}
+
+/// MicroVM-only policy in a [`PolicyDocument`]. Applies only when `runtime` is `microvm`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovm {
+    /// Resource limits.
+    pub(crate) resources: Option<PolicyMicrovmResources>,
+    /// Lifecycle timeouts.
+    pub(crate) lifecycle: Option<PolicyMicrovmLifecycle>,
+    /// Guest identity and boot configuration.
+    pub(crate) guest: Option<PolicyMicrovmGuest>,
+    /// Secrets injected via the TLS proxy with host-allowlist gating.
+    pub(crate) secrets: Option<Vec<PolicyMicrovmSecret>>,
+    /// Image pull and snapshot pinning.
+    pub(crate) image: Option<PolicyMicrovmImage>,
+    /// In-guest security profile.
+    pub(crate) security: Option<PolicyMicrovmSecurityProfile>,
+}
+
+/// Resource limits for a [`PolicyMicrovm`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovmResources {
+    pub(crate) cpus: Option<u8>,
+    /// Guest memory in mebibytes.
+    pub(crate) memory: Option<u32>,
+    /// Writable overlay upper size in mebibytes (OCI images only).
+    pub(crate) upper_size: Option<u32>,
+    pub(crate) rlimits: Option<Vec<PolicyMicrovmRlimit>>,
+}
+
+/// Lifecycle timeouts for a [`PolicyMicrovm`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovmLifecycle {
+    /// Maximum sandbox lifetime in seconds.
+    pub(crate) max_duration: Option<u64>,
+    /// Auto-stop after this many seconds of inactivity.
+    pub(crate) idle_timeout: Option<u64>,
+}
+
+/// Guest identity and boot configuration for a [`PolicyMicrovm`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovmGuest {
+    pub(crate) user: Option<String>,
+    pub(crate) hostname: Option<String>,
+    pub(crate) shell: Option<String>,
+    pub(crate) entrypoint: Option<Vec<String>>,
+    pub(crate) init: Option<PolicyMicrovmInit>,
+}
+
+/// PID 1 init handoff for a [`PolicyMicrovmGuest`].
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovmInit {
+    /// Init binary path or the literal `"auto"`.
+    pub(crate) cmd: String,
+    pub(crate) args: Option<Vec<String>>,
+    pub(crate) env: Option<Vec<(String, String)>>,
+}
+
+/// A secret injected via the TLS proxy.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovmSecret {
+    pub(crate) env_var: String,
+    pub(crate) value: String,
+    pub(crate) allowed_hosts: Vec<PolicySecretHostPattern>,
+}
+
+/// Host pattern for secret allowlisting.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PolicySecretHostPattern {
+    /// Exact hostname match.
+    Exact { host: String },
+    /// Wildcard match (e.g., `*.openai.com`).
+    Wildcard { pattern: String },
+    /// Any host (dangerous: secret can be exfiltrated).
+    Any,
+}
+
+/// Image pull and snapshot pinning for a [`PolicyMicrovm`].
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovmImage {
+    pub(crate) pull_policy: Option<PolicyPullPolicy>,
+    /// Snapshot artifact path or bare name (mutually exclusive with `image`).
+    pub(crate) snapshot: Option<String>,
+}
+
+/// OCI image pull policy.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyPullPolicy {
+    IfMissing,
+    Always,
+    Never,
+}
+
+/// In-guest security profile.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyMicrovmSecurityProfile {
+    Default,
+    Restricted,
+}
+
+/// A POSIX resource limit.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PolicyMicrovmRlimit {
+    pub(crate) resource: PolicyRlimitResource,
+    pub(crate) soft: u64,
+    pub(crate) hard: u64,
+}
+
+/// POSIX resource limit identifier.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyRlimitResource {
+    Cpu,
+    Fsize,
+    Data,
+    Stack,
+    Core,
+    Rss,
+    Nproc,
+    Nofile,
+    Memlock,
+    As,
+    Locks,
+    Sigpending,
+    Msgqueue,
+    Nice,
+    Rtprio,
+    Rttime,
 }
 
 /// Read a [`PolicyDocument`] from a file path or stdin (`-`)..
@@ -201,6 +352,7 @@ pub fn reject_unknown_policy_fields(value: &serde_json::Value) -> Result<()> {
                 | "sshAgent"
                 | "gpgAgent"
                 | "ageAgent"
+                | "microvm"
         ) {
             return Err(Error::policy(format!("unknown policy field: {key}")));
         }
@@ -245,6 +397,7 @@ pub fn policy_document_request_with_runtime(
     let effective_runtime = runtime_override
         .or(runtime)
         .unwrap_or(CliRuntimeMode::Platform);
+    let microvm_policy = microvm_policy_from(sandbox.microvm.as_ref())?;
     let request = ExecRequest::new(cwd, command, allowed_env).map(|request| {
         request
             .with_env_policy(env_policy, denied_env)
@@ -254,21 +407,183 @@ pub fn policy_document_request_with_runtime(
             .with_proc_mode(proc_mode)
             .with_agent_policy(agent_policy)
     });
-    let request = match (effective_runtime, image) {
-        (CliRuntimeMode::Microvm, Some(image)) if !image.is_empty() => {
+    // Runtime/image cross-field validation. A snapshot pins the image, so it
+    // satisfies the microvm image requirement and is mutually exclusive with an
+    // explicit image reference. The microvm-only policy block is accepted under
+    // any runtime: the platform backends warn and ignore knobs they cannot honor.
+    let has_snapshot = microvm_policy.image().snapshot().is_some();
+    let request = match (effective_runtime, image, has_snapshot) {
+        (CliRuntimeMode::Microvm, Some(image), false) if !image.is_empty() => {
             request.map(|request| request.with_microvm_image(image))
         }
-        (CliRuntimeMode::Microvm, _) => Err(heimdall_core::Error::sandbox_misconfiguration(
-            "microvm runtime requires non-empty policy image",
+        (CliRuntimeMode::Microvm, Some(image), true) if !image.is_empty() => {
+            Err(heimdall_core::Error::sandbox_misconfiguration(
+                "policy image is mutually exclusive with microvm.image.snapshot",
+            ))
+        }
+        (CliRuntimeMode::Microvm, _, true) => request,
+        (CliRuntimeMode::Microvm, _, false) => Err(heimdall_core::Error::sandbox_misconfiguration(
+            "microvm runtime requires non-empty policy image or microvm.image.snapshot",
         )),
-        (CliRuntimeMode::Platform, Some(_)) => Err(heimdall_core::Error::sandbox_misconfiguration(
-            "policy image requires runtime microvm",
-        )),
-        (CliRuntimeMode::Platform, None) => request,
+        // Platform runtime ignores the image reference and the microvm-only
+        // policy block; the executor warns about knobs it cannot honor.
+        (CliRuntimeMode::Platform, Some(image), _) if !image.is_empty() => {
+            request.map(|request| request.with_microvm_image(image))
+        }
+        (CliRuntimeMode::Platform, _, _) => request,
     };
+    let request = request.and_then(|request| request.with_microvm_policy(microvm_policy));
     request
         .and_then(|request| request.with_filesystem_policy(filesystem_policy))
         .map_err(|error| Error::policy(error.to_string()))
+}
+
+/// Convert a [`PolicyMicrovm`] into a core [`MicrovmPolicy`].
+///
+/// Returns the default (empty) policy when `config` is `None`.
+fn microvm_policy_from(config: Option<&PolicyMicrovm>) -> Result<MicrovmPolicy> {
+    let Some(config) = config else {
+        return Ok(MicrovmPolicy::default());
+    };
+    let resources = config
+        .resources
+        .as_ref()
+        .map(|resources| {
+            MicrovmResources::new(
+                resources.cpus,
+                resources.memory,
+                resources.upper_size,
+                resources
+                    .rlimits
+                    .as_ref()
+                    .map(|rlimits| {
+                        rlimits
+                            .iter()
+                            .map(|rlimit| {
+                                RlimitSpec::new(
+                                    map_rlimit_resource(rlimit.resource),
+                                    rlimit.soft,
+                                    rlimit.hard,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
+    let lifecycle = config
+        .lifecycle
+        .as_ref()
+        .map(|lifecycle| MicrovmLifecycle::new(lifecycle.max_duration, lifecycle.idle_timeout))
+        .unwrap_or_default();
+    let guest = config
+        .guest
+        .as_ref()
+        .map(|guest| {
+            MicrovmGuest::new(
+                guest.user.clone(),
+                guest.hostname.clone(),
+                guest.shell.clone(),
+                guest.entrypoint.clone(),
+                guest.init.as_ref().map(|init| {
+                    MicrovmInit::new(
+                        init.cmd.clone(),
+                        init.args.clone().unwrap_or_default(),
+                        init.env.clone().unwrap_or_default(),
+                    )
+                }),
+            )
+        })
+        .unwrap_or_default();
+    let secrets = config
+        .secrets
+        .as_ref()
+        .map(|secrets| {
+            secrets
+                .iter()
+                .map(|secret| {
+                    MicrovmSecret::new(
+                        secret.env_var.clone(),
+                        secret.value.clone(),
+                        secret
+                            .allowed_hosts
+                            .iter()
+                            .cloned()
+                            .map(map_host_pattern)
+                            .collect(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let image = config
+        .image
+        .as_ref()
+        .map(|image| {
+            MicrovmImage::new(
+                image.pull_policy.map(map_pull_policy),
+                image.snapshot.clone(),
+            )
+        })
+        .unwrap_or_default();
+    let security_profile = config.security.map(map_security_profile);
+    Ok(MicrovmPolicy::new(
+        resources,
+        lifecycle,
+        guest,
+        secrets,
+        image,
+        security_profile,
+    ))
+}
+
+/// Map a [`PolicyPullPolicy`] to a core [`PullPolicy`].
+fn map_pull_policy(policy: PolicyPullPolicy) -> PullPolicy {
+    match policy {
+        PolicyPullPolicy::IfMissing => PullPolicy::IfMissing,
+        PolicyPullPolicy::Always => PullPolicy::Always,
+        PolicyPullPolicy::Never => PullPolicy::Never,
+    }
+}
+
+/// Map a [`PolicyMicrovmSecurityProfile`] to a core [`SecurityProfile`].
+fn map_security_profile(profile: PolicyMicrovmSecurityProfile) -> SecurityProfile {
+    match profile {
+        PolicyMicrovmSecurityProfile::Default => SecurityProfile::Default,
+        PolicyMicrovmSecurityProfile::Restricted => SecurityProfile::Restricted,
+    }
+}
+
+/// Map a [`PolicyRlimitResource`] to a core [`RlimitResource`].
+fn map_rlimit_resource(resource: PolicyRlimitResource) -> RlimitResource {
+    match resource {
+        PolicyRlimitResource::Cpu => RlimitResource::Cpu,
+        PolicyRlimitResource::Fsize => RlimitResource::Fsize,
+        PolicyRlimitResource::Data => RlimitResource::Data,
+        PolicyRlimitResource::Stack => RlimitResource::Stack,
+        PolicyRlimitResource::Core => RlimitResource::Core,
+        PolicyRlimitResource::Rss => RlimitResource::Rss,
+        PolicyRlimitResource::Nproc => RlimitResource::Nproc,
+        PolicyRlimitResource::Nofile => RlimitResource::Nofile,
+        PolicyRlimitResource::Memlock => RlimitResource::Memlock,
+        PolicyRlimitResource::As => RlimitResource::As,
+        PolicyRlimitResource::Locks => RlimitResource::Locks,
+        PolicyRlimitResource::Sigpending => RlimitResource::Sigpending,
+        PolicyRlimitResource::Msgqueue => RlimitResource::Msgqueue,
+        PolicyRlimitResource::Nice => RlimitResource::Nice,
+        PolicyRlimitResource::Rtprio => RlimitResource::Rtprio,
+        PolicyRlimitResource::Rttime => RlimitResource::Rttime,
+    }
+}
+
+/// Map a [`PolicySecretHostPattern`] to a core [`SecretHostPattern`].
+fn map_host_pattern(pattern: PolicySecretHostPattern) -> SecretHostPattern {
+    match pattern {
+        PolicySecretHostPattern::Exact { host } => SecretHostPattern::Exact(host),
+        PolicySecretHostPattern::Wildcard { pattern } => SecretHostPattern::Wildcard(pattern),
+        PolicySecretHostPattern::Any => SecretHostPattern::Any,
+    }
 }
 
 /// Expand shell variables and `~` in a path.
@@ -532,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_platform_override_rejects_policy_image() {
+    fn cli_platform_override_accepts_policy_image_with_warning() {
         let policy = serde_json::from_str::<PolicyDocument>(
             r#"{
               "runtime": "microvm",
@@ -543,14 +858,13 @@ mod tests {
         )
         .expect("policy JSON parses");
 
-        let error = policy_document_request_with_runtime(policy, Some(CliRuntimeMode::Platform))
-            .expect_err("platform runtime rejects image");
+        // Platform runtime ignores the image reference (warns at exec time);
+        // config conversion no longer rejects it.
+        let request = policy_document_request_with_runtime(policy, Some(CliRuntimeMode::Platform))
+            .expect("platform runtime accepts image");
 
-        assert!(
-            error
-                .to_string()
-                .contains("policy image requires runtime microvm")
-        );
+        assert_eq!(request.runtime_mode(), RuntimeMode::Platform);
+        assert_eq!(request.microvm_image(), Some("alpine"));
     }
 
     #[test]
@@ -710,5 +1024,197 @@ mod tests {
         let error = reject_unknown_policy_fields(&value).expect_err("unknown field is rejected");
 
         assert!(error.to_string().contains("unknown policy field: bogus"));
+    }
+
+    #[test]
+    fn policy_document_accepts_microvm_resources_and_user() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": {
+                "resources": { "cpus": 2, "memory": 512, "upper_size": 256 },
+                "guest": { "user": "appuser", "hostname": "worker" },
+                "image": { "pull_policy": "always" },
+                "security": "restricted"
+              }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("microvm policy converts");
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Microvm);
+        assert_eq!(request.microvm_policy().resources().cpus(), Some(2));
+        assert_eq!(request.microvm_policy().resources().memory_mib(), Some(512));
+        assert_eq!(
+            request.microvm_policy().resources().upper_size_mib(),
+            Some(256)
+        );
+        assert_eq!(request.microvm_policy().guest().user(), Some("appuser"));
+        assert_eq!(request.microvm_policy().guest().hostname(), Some("worker"));
+        assert_eq!(
+            request.microvm_policy().security_profile(),
+            Some(heimdall_core::SecurityProfile::Restricted)
+        );
+        assert_eq!(
+            request.microvm_policy().image().pull_policy(),
+            Some(heimdall_core::PullPolicy::Always)
+        );
+    }
+
+    #[test]
+    fn policy_document_accepts_microvm_secret() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": {
+                "secrets": [
+                  {
+                    "env_var": "OPENAI_API_KEY",
+                    "value": "sk-test",
+                    "allowed_hosts": [
+                      { "kind": "exact", "host": "api.openai.com" },
+                      { "kind": "wildcard", "pattern": "*.openai.com" }
+                    ]
+                  }
+                ]
+              }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("secret policy converts");
+
+        let secrets = request.microvm_policy().secrets();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].env_var(), "OPENAI_API_KEY");
+        assert_eq!(secrets[0].value(), "sk-test");
+        assert_eq!(secrets[0].allowed_hosts().len(), 2);
+    }
+
+    #[test]
+    fn policy_document_accepts_microvm_snapshot_without_image() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": { "image": { "snapshot": "pinned-v1" } }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("snapshot satisfies image");
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Microvm);
+        assert_eq!(request.microvm_image(), None);
+        assert_eq!(
+            request.microvm_policy().image().snapshot(),
+            Some("pinned-v1")
+        );
+    }
+
+    #[test]
+    fn policy_document_rejects_snapshot_with_image() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": { "image": { "snapshot": "pinned-v1" } }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request(policy).expect_err("snapshot+image rejects");
+
+        assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn policy_document_accepts_microvm_policy_under_platform_runtime() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": { "resources": { "cpus": 2 } }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        // Platform runtime carries the microvm-only policy; the platform backend
+        // warns and ignores knobs it cannot honor instead of rejecting config.
+        let request = policy_document_request(policy).expect("platform+microvm accepts");
+
+        assert_eq!(request.runtime_mode(), RuntimeMode::Platform);
+        assert_eq!(request.microvm_policy().resources().cpus(), Some(2));
+    }
+
+    #[test]
+    fn policy_document_rejects_microvm_without_image_or_snapshot() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": { "resources": { "cpus": 2 } }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request(policy).expect_err("microvm without image rejects");
+
+        assert!(error.to_string().contains("non-empty policy image"));
+    }
+
+    #[test]
+    fn policy_document_rejects_microvm_zero_cpus() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": { "resources": { "cpus": 0 } }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let error = policy_document_request(policy).expect_err("zero cpus rejects");
+
+        assert!(error.to_string().contains("cpus"));
+    }
+
+    #[test]
+    fn policy_document_accepts_microvm_rlimit() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "runtime": "microvm",
+              "image": "alpine",
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "microvm": {
+                "resources": {
+                  "rlimits": [{ "resource": "nofile", "soft": 1024, "hard": 2048 }]
+                }
+              }
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("rlimit policy converts");
+
+        let rlimits = request.microvm_policy().resources().rlimits();
+        assert_eq!(rlimits.len(), 1);
+        assert_eq!(rlimits[0].resource(), heimdall_core::RlimitResource::Nofile);
+        assert_eq!(rlimits[0].soft(), 1024);
+        assert_eq!(rlimits[0].hard(), 2048);
     }
 }
