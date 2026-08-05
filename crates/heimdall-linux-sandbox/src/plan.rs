@@ -2,9 +2,11 @@ use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::device_access::{self, DeviceAccessWarning};
 use crate::launcher::BubblewrapLauncher;
 use crate::policy::{
     AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy,
@@ -186,7 +188,7 @@ struct PreparedBubblewrap<'a> {
 
 impl PreparedBubblewrap<'_> {
     fn build(self) -> Result<BubblewrapPlan> {
-        let args = BubblewrapArgBuilder::new(
+        let (args, device_access_warnings) = BubblewrapArgBuilder::new(
             &self.request,
             &self.materialized,
             &self.resources,
@@ -199,6 +201,7 @@ impl PreparedBubblewrap<'_> {
             args,
             resources: self.resources,
             missing_deny_guards: self.materialized.missing_deny_guards().clone(),
+            device_access_warnings,
         })
     }
 }
@@ -209,6 +212,7 @@ pub struct BubblewrapPlan {
     args: Vec<OsString>,
     resources: BubblewrapResources,
     missing_deny_guards: BTreeSet<PathBuf>,
+    device_access_warnings: Vec<DeviceAccessWarning>,
 }
 
 impl BubblewrapPlan {
@@ -241,6 +245,16 @@ impl BubblewrapPlan {
             }
         }
         Ok(())
+    }
+
+    /// Bind-mounted device or socket targets the sandbox user will not be able to read/write.
+    ///
+    /// Diagnostics only; the bind still happens. Each warning carries the exact `setfacl`
+    /// remediation because supplementary groups are dropped inside the user namespace while
+    /// uid-based access survives a bind mount.
+    #[must_use]
+    pub fn device_access_warnings(&self) -> &[DeviceAccessWarning] {
+        &self.device_access_warnings
     }
 }
 
@@ -395,6 +409,7 @@ struct BubblewrapArgBuilder<'a> {
     resources: &'a BubblewrapResources,
     launcher: &'a BubblewrapLauncher,
     args: Vec<OsString>,
+    device_access_warnings: Vec<DeviceAccessWarning>,
 }
 
 impl<'a> BubblewrapArgBuilder<'a> {
@@ -410,16 +425,18 @@ impl<'a> BubblewrapArgBuilder<'a> {
             resources,
             launcher,
             args: Vec::new(),
+            device_access_warnings: Vec::new(),
         }
     }
 
-    fn build(mut self) -> Result<Vec<OsString>> {
+    fn build(mut self) -> Result<(Vec<OsString>, Vec<DeviceAccessWarning>)> {
         self.validate_required_startup_paths()?;
         self.add_namespaces();
         self.add_readonly_base_filesystem()?;
         self.add_policy_mounts()?;
         self.add_inner_reentry()?;
-        Ok(self.args)
+        let device_access_warnings = std::mem::take(&mut self.device_access_warnings);
+        Ok((self.args, device_access_warnings))
     }
 
     fn validate_required_startup_paths(&self) -> Result<()> {
@@ -529,6 +546,8 @@ impl<'a> BubblewrapArgBuilder<'a> {
         );
         mounts.sort_by_key(PolicyMount::sort_key);
 
+        self.collect_device_access_warnings(&mounts);
+
         for index in 0..mounts.len() {
             let mount = mounts[index];
             if mount.is_directory_mask()
@@ -584,7 +603,11 @@ impl<'a> BubblewrapArgBuilder<'a> {
         match mount.kind {
             PolicyMountKind::Writable => {
                 let destination = bubblewrap_mount_destination(mount.destination)?;
-                self.bind(mount.source, &destination);
+                if is_device_node(mount.source) {
+                    self.dev_bind(mount.source, &destination);
+                } else {
+                    self.bind(mount.source, &destination);
+                }
             }
             PolicyMountKind::Readable | PolicyMountKind::AgentReadable => {
                 let destination = bubblewrap_mount_destination(mount.destination)?;
@@ -607,6 +630,31 @@ impl<'a> BubblewrapArgBuilder<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Flag bind targets whose host node is a device or socket the sandbox user will not be
+    /// able to read/write. Bind mounts preserve the host inode, but `--unshare-user` drops
+    /// supplementary groups, so group-based access (kvm/docker) fails while uid-based access
+    /// survives. Only writable/readable/agent-readable/runtime-socket targets are checked;
+    /// deny/protected masks bind empty artifacts and virtual files pass file descriptors.
+    fn collect_device_access_warnings(&mut self, mounts: &[PolicyMount<'_>]) {
+        let mut targets: Vec<PathBuf> = Vec::new();
+        for mount in mounts {
+            match mount.kind {
+                PolicyMountKind::Writable
+                | PolicyMountKind::Readable
+                | PolicyMountKind::AgentReadable
+                | PolicyMountKind::RuntimeSocket => {
+                    targets.push(mount.source.to_path_buf());
+                }
+                PolicyMountKind::VirtualFile { .. }
+                | PolicyMountKind::Deny
+                | PolicyMountKind::Protected
+                | PolicyMountKind::MissingDenyGuard => {}
+            }
+        }
+        self.device_access_warnings
+            .extend(device_access::collect_device_access_warnings(&targets));
     }
 
     fn add_staged_mountpoint(&mut self, mask: &Path, mount: &PolicyMount<'_>, empty_file: &Path) {
@@ -850,6 +898,15 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.mount("--bind", source, destination);
     }
 
+    /// Bind a device node so the mount is not `nodev`. `--bind` inherits `nodev` from the
+    /// destination's parent (the `--dev /dev` tmpfs is `nodev`), which makes `open(2)` of a
+    /// device return `EACCES` regardless of uid/groups/ACL. `--dev-bind` mounts without
+    /// `nodev`, so device access depends only on DAC (and the uid POSIX-ACL survives the
+    /// bind because supplementary groups do not).
+    fn dev_bind(&mut self, source: &Path, destination: &Path) {
+        self.mount("--dev-bind", source, destination);
+    }
+
     fn tmpfs(&mut self, destination: &Path) {
         self.single_path_arg("--tmpfs", destination);
     }
@@ -941,6 +998,17 @@ fn optional_path_exists(path: &Path) -> Result<bool> {
     concrete_path_state(path)
         .map(|state| matches!(state, heimdall_sandbox_policy::ConcretePathState::Existing))
         .map_err(Into::into)
+}
+
+/// Whether `path` is a character or block device node. Device nodes must be mounted with
+/// `--dev-bind` (not `--bind`) so the mount is not `nodev`, otherwise `open(2)` returns
+/// `EACCES` regardless of uid/groups/ACL.
+fn is_device_node(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| {
+            metadata.file_type().is_char_device() || metadata.file_type().is_block_device()
+        })
+        .unwrap_or(false)
 }
 
 fn bubblewrap_mount_destination(path: &Path) -> Result<PathBuf> {

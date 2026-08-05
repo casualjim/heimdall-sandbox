@@ -1,5 +1,6 @@
 //! Linux bubblewrap sandbox planning and filesystem policy materialization.
 
+mod device_access;
 mod launcher;
 mod plan;
 mod policy;
@@ -7,6 +8,7 @@ mod virtual_files;
 
 use thiserror::Error as ThisError;
 
+pub use device_access::DeviceAccessWarning;
 pub use plan::{BubblewrapPlan, BubblewrapRequest};
 
 /// Result type for Linux sandbox operations.
