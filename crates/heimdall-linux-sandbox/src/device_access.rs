@@ -183,29 +183,39 @@ pub fn uid_has_rw_access(mode: u32, owner_uid: u32, acl: Option<&[u8]>, uid: u32
 ///
 /// Returns `None` when the filesystem lacks ACL support or no ACL is set; growth-retries on
 /// `ERANGE`. All other failures are treated as "no ACL" so diagnostics fail open.
+///
+/// POSIX ACL xattrs are a Linux concept; on other platforms there is nothing to read.
 fn read_acl_access(path: &Path) -> Option<Vec<u8>> {
-    let cpath = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let name = b"system.posix_acl_access\0";
-    let mut buffer = vec![0_u8; 256];
-    loop {
-        let written = unsafe {
-            libc::lgetxattr(
-                cpath.as_ptr(),
-                name.as_ptr().cast(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-            )
-        };
-        if written >= 0 {
-            buffer.truncate(written as usize);
-            return Some(buffer);
+    #[cfg(target_os = "linux")]
+    {
+        let cpath = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let name = b"system.posix_acl_access\0";
+        let mut buffer = vec![0_u8; 256];
+        loop {
+            let written = unsafe {
+                libc::lgetxattr(
+                    cpath.as_ptr(),
+                    name.as_ptr().cast(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if written >= 0 {
+                buffer.truncate(written as usize);
+                return Some(buffer);
+            }
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno == libc::ERANGE {
+                buffer.resize(buffer.len() * 2, 0);
+                continue;
+            }
+            return None;
         }
-        let errno = unsafe { *libc::__errno_location() };
-        if errno == libc::ERANGE {
-            buffer.resize(buffer.len() * 2, 0);
-            continue;
-        }
-        return None;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        None
     }
 }
 
