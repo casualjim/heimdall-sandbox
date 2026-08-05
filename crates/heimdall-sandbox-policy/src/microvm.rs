@@ -215,29 +215,50 @@ impl MicrovmGuest {
     }
 }
 
-/// A secret injected via the TLS proxy with host-allowlist gating.
+/// A secret injected via the boxlite MITM proxy with host-allowlist gating.
+///
+/// Maps 1:1 to `boxlite::runtime::options::Secret{name, hosts, placeholder,
+/// value}` (V44). The guest sees `BOXLITE_SECRET_<NAME>=<placeholder>`; the
+/// real `value` never enters the VM and is substituted only for traffic to
+/// matching `hosts` (R5). `SecretHostPattern::Any` is rejected at the schema
+/// layer (V44).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MicrovmSecret {
-    env_var: String,
+    name: String,
+    placeholder: String,
     value: String,
-    allowed_hosts: Vec<SecretHostPattern>,
+    hosts: Vec<SecretHostPattern>,
 }
 
 impl MicrovmSecret {
-    /// Create a secret from an env var name, value, and allowed-host patterns.
+    /// Create a secret from a name, placeholder, value, and allowed-host patterns.
     #[must_use]
-    pub fn new(env_var: String, value: String, allowed_hosts: Vec<SecretHostPattern>) -> Self {
+    pub fn new(
+        name: String,
+        placeholder: String,
+        value: String,
+        hosts: Vec<SecretHostPattern>,
+    ) -> Self {
         Self {
-            env_var,
+            name,
+            placeholder,
             value,
-            allowed_hosts,
+            hosts,
         }
     }
 
-    /// Environment variable name exposed to the sandbox (holds the placeholder).
+    /// Human-readable secret name; boxlite derives the guest env var key
+    /// (`BOXLITE_SECRET_<NAME>`) from it.
     #[must_use]
-    pub fn env_var(&self) -> &str {
-        &self.env_var
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Placeholder string visible to the guest; substituted with `value` on
+    /// egress to matching `hosts`.
+    #[must_use]
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
     }
 
     /// The actual secret value (never enters the sandbox unguarded).
@@ -246,10 +267,10 @@ impl MicrovmSecret {
         &self.value
     }
 
-    /// Hosts allowed to receive this secret.
+    /// Hosts allowed to receive this secret (exact or wildcard).
     #[must_use]
-    pub fn allowed_hosts(&self) -> &[SecretHostPattern] {
-        &self.allowed_hosts
+    pub fn hosts(&self) -> &[SecretHostPattern] {
+        &self.hosts
     }
 }
 
@@ -396,14 +417,24 @@ pub fn validate_microvm_policy(policy: &MicrovmPolicy) -> crate::Result<()> {
     }
 
     for (index, secret) in policy.secrets().iter().enumerate() {
-        if secret.env_var().is_empty() {
+        if secret.name().is_empty() {
             return Err(crate::Error::InvalidMicrovmPolicy(format!(
-                "secrets[{index}].envVar must be non-empty"
+                "secrets[{index}].name must be non-empty"
             )));
         }
-        if secret.env_var().contains('=') || secret.env_var().contains('\0') {
+        if secret.name().contains('\0') {
             return Err(crate::Error::InvalidMicrovmPolicy(format!(
-                "secrets[{index}].envVar must not contain '=' or NUL"
+                "secrets[{index}].name must not contain NUL"
+            )));
+        }
+        if secret.placeholder().is_empty() {
+            return Err(crate::Error::InvalidMicrovmPolicy(format!(
+                "secrets[{index}].placeholder must be non-empty"
+            )));
+        }
+        if secret.placeholder().contains('\0') {
+            return Err(crate::Error::InvalidMicrovmPolicy(format!(
+                "secrets[{index}].placeholder must not contain NUL"
             )));
         }
         if secret.value().is_empty() {
@@ -411,9 +442,9 @@ pub fn validate_microvm_policy(policy: &MicrovmPolicy) -> crate::Result<()> {
                 "secrets[{index}].value must be non-empty"
             )));
         }
-        if secret.allowed_hosts().is_empty() {
+        if secret.hosts().is_empty() {
             return Err(crate::Error::InvalidMicrovmPolicy(format!(
-                "secrets[{index}].allowedHosts must be non-empty"
+                "secrets[{index}].hosts must be non-empty"
             )));
         }
     }
@@ -484,8 +515,13 @@ mod tests {
     }
 
     #[test]
-    fn validates_secret_missing_allowed_hosts() {
-        let secret = MicrovmSecret::new("API_KEY".to_string(), "sk-...".to_string(), Vec::new());
+    fn validates_secret_missing_hosts() {
+        let secret = MicrovmSecret::new(
+            "API_KEY".to_string(),
+            "<PLACEHOLDER>".to_string(),
+            "sk-...".to_string(),
+            Vec::new(),
+        );
         let policy = MicrovmPolicy::new(
             MicrovmResources::default(),
             MicrovmLifecycle::default(),
@@ -494,15 +530,16 @@ mod tests {
             None,
         );
 
-        let error = validate_microvm_policy(&policy).expect_err("missing allowedHosts rejects");
+        let error = validate_microvm_policy(&policy).expect_err("missing hosts rejects");
 
-        assert!(error.to_string().contains("allowedHosts"));
+        assert!(error.to_string().contains("hosts"));
     }
 
     #[test]
-    fn validates_secret_env_var_with_equals() {
+    fn validates_secret_name_with_nul() {
         let secret = MicrovmSecret::new(
-            "API=KEY".to_string(),
+            "API\0KEY".to_string(),
+            "<PLACEHOLDER>".to_string(),
             "sk-...".to_string(),
             vec![SecretHostPattern::Exact("api.openai.com".to_string())],
         );
@@ -514,18 +551,48 @@ mod tests {
             None,
         );
 
-        let error = validate_microvm_policy(&policy).expect_err("env var with = rejects");
+        let error = validate_microvm_policy(&policy).expect_err("name with NUL rejects");
 
-        assert!(error.to_string().contains("envVar"));
+        assert!(error.to_string().contains("name"));
+    }
+
+    #[test]
+    fn validates_secret_empty_placeholder() {
+        let secret = MicrovmSecret::new(
+            "API_KEY".to_string(),
+            String::new(),
+            "sk-...".to_string(),
+            vec![SecretHostPattern::Exact("api.openai.com".to_string())],
+        );
+        let policy = MicrovmPolicy::new(
+            MicrovmResources::default(),
+            MicrovmLifecycle::default(),
+            MicrovmGuest::default(),
+            vec![secret],
+            None,
+        );
+
+        let error = validate_microvm_policy(&policy).expect_err("empty placeholder rejects");
+
+        assert!(error.to_string().contains("placeholder"));
     }
 
     #[test]
     fn accepts_well_formed_policy() {
+        let secret = MicrovmSecret::new(
+            "openai_api_key".to_string(),
+            "<BOXLITE_SECRET:openai>".to_string(),
+            "sk-...".to_string(),
+            vec![
+                SecretHostPattern::Exact("api.openai.com".to_string()),
+                SecretHostPattern::Wildcard("*.openai.com".to_string()),
+            ],
+        );
         let policy = MicrovmPolicy::new(
             MicrovmResources::new(Some(2), Some(512), Some(256), Vec::new()),
             MicrovmLifecycle::new(Some(3600), None),
             MicrovmGuest::new(Some("appuser".to_string()), None),
-            Vec::new(),
+            vec![secret],
             Some(SecurityProfile::Restricted),
         );
 

@@ -211,14 +211,18 @@ pub struct PolicyMicrovmGuest {
     pub(crate) entrypoint: Option<Vec<String>>,
 }
 
-/// A secret injected via the TLS proxy.
+/// A secret injected via the boxlite MITM proxy.
+///
+/// Maps to `boxlite::Secret{name, hosts, placeholder, value}` (V44); the JSON
+/// surface is `{name, placeholder, value, hosts[exact|wildcard]}`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct PolicyMicrovmSecret {
-    pub(crate) env_var: String,
+    pub(crate) name: String,
+    pub(crate) placeholder: String,
     pub(crate) value: String,
-    pub(crate) allowed_hosts: Vec<PolicySecretHostPattern>,
+    pub(crate) hosts: Vec<PolicySecretHostPattern>,
 }
 
 /// Host pattern for secret allowlisting.
@@ -448,14 +452,10 @@ fn microvm_policy_from(config: Option<&PolicyMicrovm>) -> Result<MicrovmPolicy> 
                 .iter()
                 .map(|secret| {
                     MicrovmSecret::new(
-                        secret.env_var.clone(),
+                        secret.name.clone(),
+                        secret.placeholder.clone(),
                         secret.value.clone(),
-                        secret
-                            .allowed_hosts
-                            .iter()
-                            .cloned()
-                            .map(map_host_pattern)
-                            .collect(),
+                        secret.hosts.iter().cloned().map(map_host_pattern).collect(),
                     )
                 })
                 .collect()
@@ -1005,9 +1005,10 @@ mod tests {
               "microvm": {
                 "secrets": [
                   {
-                    "env_var": "OPENAI_API_KEY",
+                    "name": "openai_api_key",
+                    "placeholder": "<BOXLITE_SECRET:openai>",
                     "value": "sk-test",
-                    "allowed_hosts": [
+                    "hosts": [
                       { "kind": "exact", "host": "api.openai.com" },
                       { "kind": "wildcard", "pattern": "*.openai.com" }
                     ]
@@ -1022,9 +1023,10 @@ mod tests {
 
         let secrets = request.microvm_policy().secrets();
         assert_eq!(secrets.len(), 1);
-        assert_eq!(secrets[0].env_var(), "OPENAI_API_KEY");
+        assert_eq!(secrets[0].name(), "openai_api_key");
+        assert_eq!(secrets[0].placeholder(), "<BOXLITE_SECRET:openai>");
         assert_eq!(secrets[0].value(), "sk-test");
-        assert_eq!(secrets[0].allowed_hosts().len(), 2);
+        assert_eq!(secrets[0].hosts().len(), 2);
     }
 
     #[test]
@@ -1118,9 +1120,10 @@ mod tests {
               "microvm": {
                 "secrets": [
                   {
-                    "env_var": "K",
+                    "name": "K",
+                    "placeholder": "<P>",
                     "value": "v",
-                    "allowed_hosts": [{ "kind": "any" }]
+                    "hosts": [{ "kind": "any" }]
                   }
                 ]
               }

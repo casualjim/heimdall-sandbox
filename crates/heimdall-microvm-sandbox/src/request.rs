@@ -6,12 +6,12 @@ use std::time::Duration;
 use boxlite::runtime::options::VolumeSpec;
 use boxlite::{
     AdvancedBoxOptions, BoxCommand, BoxOptions, BoxliteRuntime, ExecStderr, ExecStdout, LiteBox,
-    NetworkSpec, RootfsSpec,
+    NetworkSpec, RootfsSpec, Secret,
 };
 use futures::StreamExt;
 use heimdall_sandbox_policy::{
-    AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, MicrovmPolicy, NetworkMode,
-    ProcMode, RlimitResource,
+    AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, MicrovmPolicy, MicrovmSecret,
+    NetworkMode, ProcMode, RlimitResource, SecretHostPattern,
 };
 
 use crate::environment::utf8_environment;
@@ -78,11 +78,6 @@ impl MicrovmRequest<'_> {
         if policy.lifecycle().idle_timeout_secs().is_some() {
             return Err(Error::unsupported_policy(
                 "microvm runtime does not support lifecycle.idleTimeout on boxlite",
-            ));
-        }
-        if !policy.secrets().is_empty() {
-            return Err(Error::unsupported_policy(
-                "microvm runtime does not yet map secrets to boxlite Secret",
             ));
         }
         if !self.filesystem_policy.virtual_files().is_empty() {
@@ -170,7 +165,7 @@ impl MicrovmRequest<'_> {
                 .entrypoint()
                 .map(|entrypoint| entrypoint.to_vec()),
             user: policy.guest().user().map(String::from),
-            secrets: Vec::new(),
+            secrets: policy.secrets().iter().map(map_secret).collect(),
             advanced: self.build_advanced()?,
             ..Default::default()
         })
@@ -261,6 +256,27 @@ async fn drain_stderr(stream: Option<&mut ExecStderr>) -> Result<()> {
             .map_err(Error::Output)?;
     }
     Ok(())
+}
+
+/// Map a Heimdall [`MicrovmSecret`] to a `boxlite::Secret`.
+///
+/// `SecretHostPattern` flattens to plain host strings: boxlite performs its
+/// own exact + `*.wildcard` matching (R5). `SecretHostPattern::Any` is
+/// rejected at the schema layer and never reaches here (V44).
+fn map_secret(secret: &MicrovmSecret) -> Secret {
+    Secret {
+        name: secret.name().to_string(),
+        hosts: secret
+            .hosts()
+            .iter()
+            .map(|pattern| match pattern {
+                SecretHostPattern::Exact(host) => host.clone(),
+                SecretHostPattern::Wildcard(pattern) => pattern.clone(),
+            })
+            .collect(),
+        placeholder: secret.placeholder().to_string(),
+        value: secret.value().to_string(),
+    }
 }
 
 /// Map a boxlite exit code to a Heimdall exit code.
@@ -388,9 +404,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_secrets() {
+    fn accepts_secrets() {
         let secret = MicrovmSecret::new(
-            "API_KEY".to_string(),
+            "openai_api_key".to_string(),
+            "<BOXLITE_SECRET:openai>".to_string(),
             "sk-...".to_string(),
             vec![SecretHostPattern::Exact("api.openai.com".to_string())],
         );
@@ -401,16 +418,32 @@ mod tests {
             vec![secret],
             None,
         );
-        let error = validate(
+        validate(
             Some("alpine"),
             &policy,
             &FilesystemPolicy::default(),
             ProcMode::Default,
             AgentPolicy::default(),
         )
-        .expect_err("secrets reject");
+        .expect("secrets validate and map to boxlite Secret");
+    }
 
-        assert!(error.to_string().contains("secrets"));
+    #[test]
+    fn maps_secret_to_boxlite() {
+        let secret = MicrovmSecret::new(
+            "openai_api_key".to_string(),
+            "<BOXLITE_SECRET:openai>".to_string(),
+            "sk-...".to_string(),
+            vec![
+                SecretHostPattern::Exact("api.openai.com".to_string()),
+                SecretHostPattern::Wildcard("*.openai.com".to_string()),
+            ],
+        );
+        let mapped = map_secret(&secret);
+        assert_eq!(mapped.name, "openai_api_key");
+        assert_eq!(mapped.placeholder, "<BOXLITE_SECRET:openai>");
+        assert_eq!(mapped.value, "sk-...");
+        assert_eq!(mapped.hosts, vec!["api.openai.com", "*.openai.com"]);
     }
 
     #[test]
