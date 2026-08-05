@@ -147,9 +147,6 @@ impl Executor {
             agent_policy: request.agent_policy(),
         }
         .into_plan()?;
-        for warning in plan.device_access_warnings() {
-            eprintln!("{warning}");
-        }
         let mut command = plan.command();
         command
             .current_dir(request.cwd())
