@@ -1,8 +1,18 @@
+## [0.1.44] - 2026-08-05
+
+### 🐛 Bug Fixes
+
+- *(linux-sandbox)* Open device nodes via --dev-bind (#19)
 ## [0.1.43] - 2026-06-03
 
 ### 🚀 Features
 
 - *(sandbox)* Add agent socket opt-ins (#18)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.43 [ci skip]
+- Release version 0.1.43
 ## [0.1.42] - 2026-05-24
 
 ### 🐛 Bug Fixes
