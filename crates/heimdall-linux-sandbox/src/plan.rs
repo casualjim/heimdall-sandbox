@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -584,7 +585,11 @@ impl<'a> BubblewrapArgBuilder<'a> {
         match mount.kind {
             PolicyMountKind::Writable => {
                 let destination = bubblewrap_mount_destination(mount.destination)?;
-                self.bind(mount.source, &destination);
+                if is_device_node(mount.source) {
+                    self.dev_bind(mount.source, &destination);
+                } else {
+                    self.bind(mount.source, &destination);
+                }
             }
             PolicyMountKind::Readable | PolicyMountKind::AgentReadable => {
                 let destination = bubblewrap_mount_destination(mount.destination)?;
@@ -850,6 +855,15 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.mount("--bind", source, destination);
     }
 
+    /// Bind a device node so the mount is not `nodev`. `--bind` inherits `nodev` from the
+    /// destination's parent (the `--dev /dev` tmpfs is `nodev`), which makes `open(2)` of a
+    /// device return `EACCES` regardless of uid/groups/ACL. `--dev-bind` mounts without
+    /// `nodev`, so device access depends only on DAC (and the uid POSIX-ACL survives the
+    /// bind because supplementary groups do not).
+    fn dev_bind(&mut self, source: &Path, destination: &Path) {
+        self.mount("--dev-bind", source, destination);
+    }
+
     fn tmpfs(&mut self, destination: &Path) {
         self.single_path_arg("--tmpfs", destination);
     }
@@ -941,6 +955,17 @@ fn optional_path_exists(path: &Path) -> Result<bool> {
     concrete_path_state(path)
         .map(|state| matches!(state, heimdall_sandbox_policy::ConcretePathState::Existing))
         .map_err(Into::into)
+}
+
+/// Whether `path` is a character or block device node. Device nodes must be mounted with
+/// `--dev-bind` (not `--bind`) so the mount is not `nodev`, otherwise `open(2)` returns
+/// `EACCES` regardless of uid/groups/ACL.
+fn is_device_node(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| {
+            metadata.file_type().is_char_device() || metadata.file_type().is_block_device()
+        })
+        .unwrap_or(false)
 }
 
 fn bubblewrap_mount_destination(path: &Path) -> Result<PathBuf> {
