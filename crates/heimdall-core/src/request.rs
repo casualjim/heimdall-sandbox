@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use heimdall_sandbox_policy::{
@@ -85,7 +86,10 @@ pub struct ExecRequest {
     env_policy: EnvPolicy,
     stdio_policy: StdioPolicy,
     network_mode: NetworkMode,
-    filesystem_policy: FilesystemPolicy,
+    /// Filesystem stance declared by the caller. `None` states no
+    /// confinement; `Some` marks sandbox intent where an empty value
+    /// confines read-only.
+    filesystem_policy: Option<FilesystemPolicy>,
     proc_mode: ProcMode,
     agent_policy: AgentPolicy,
 }
@@ -115,7 +119,7 @@ impl ExecRequest {
             env_policy: EnvPolicy::Allowlist,
             stdio_policy: StdioPolicy::Inherit,
             network_mode: NetworkMode::Host,
-            filesystem_policy: FilesystemPolicy::default(),
+            filesystem_policy: None,
             proc_mode: ProcMode::Default,
             agent_policy: AgentPolicy::default(),
         })
@@ -156,9 +160,17 @@ impl ExecRequest {
 
     /// Set the filesystem sandbox policy.
     ///
-    /// Returns an error when filesystem policy validation fails.
-    pub fn with_filesystem_policy(mut self, filesystem_policy: FilesystemPolicy) -> Result<Self> {
-        validate_filesystem_policy(&filesystem_policy)?;
+    /// `Some` declares confinement, where an empty value confines read-only.
+    /// `None` leaves the child unconfined by filesystem rules unless another
+    /// isolation request applies. Returns an error when filesystem policy
+    /// validation fails.
+    pub fn with_filesystem_policy(
+        mut self,
+        filesystem_policy: Option<FilesystemPolicy>,
+    ) -> Result<Self> {
+        if let Some(policy) = &filesystem_policy {
+            validate_filesystem_policy(policy)?;
+        }
         self.filesystem_policy = filesystem_policy;
         Ok(self)
     }
@@ -179,12 +191,13 @@ impl ExecRequest {
 
     /// Whether this request needs OS-level isolation.
     ///
-    /// Returns `true` when network isolation, filesystem controls, or host agent socket access is
+    /// Returns `true` when network isolation, a declared filesystem stance
+    /// (an empty block confines read-only), or host agent socket access is
     /// requested.
     #[must_use]
     pub fn needs_isolation(&self) -> bool {
         self.network_mode == NetworkMode::None
-            || !self.filesystem_policy.is_empty()
+            || self.filesystem_policy.is_some()
             || !self.agent_policy.is_empty()
     }
 
@@ -230,10 +243,27 @@ impl ExecRequest {
         self.network_mode
     }
 
-    /// Filesystem sandbox policy.
+    /// Filesystem stance declared by the caller.
+    ///
+    /// `None` means no filesystem confinement was declared; `Some` carries
+    /// the controls, where an empty value confines read-only.
     #[must_use]
-    pub const fn filesystem_policy(&self) -> &FilesystemPolicy {
-        &self.filesystem_policy
+    pub fn filesystem_policy(&self) -> Option<&FilesystemPolicy> {
+        self.filesystem_policy.as_ref()
+    }
+
+    /// Filesystem controls in force under isolation.
+    ///
+    /// Isolation paths call this after `needs_isolation()` returns `true`; a
+    /// request that declared no filesystem block confines read-only through
+    /// the empty policy, which both renderers treat as their closed-by-default
+    /// base profile.
+    #[must_use]
+    pub fn effective_filesystem_policy(&self) -> Cow<'_, FilesystemPolicy> {
+        match &self.filesystem_policy {
+            Some(policy) => Cow::Borrowed(policy),
+            None => Cow::Owned(FilesystemPolicy::default()),
+        }
     }
 
     /// Proc filesystem mount policy.
@@ -332,7 +362,7 @@ mod tests {
         );
 
         let error = request
-            .with_filesystem_policy(filesystem_policy)
+            .with_filesystem_policy(Some(filesystem_policy))
             .expect_err("relative virtual path is rejected");
 
         assert_eq!(error.exit_code(), crate::SANDBOX_MISCONFIGURATION_EXIT_CODE);
