@@ -2147,7 +2147,7 @@ fn sigterm_is_forwarded_to_seatbelt_child() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn declared_empty_filesystem_confines_read_only() {
-    let cwd = unique_project_dir("read-only-default");
+    let cwd = unique_home_dir("read-only-default");
     std::fs::write(cwd.join("readable.txt"), "data").expect("seed file written");
     let policy = format!(
         r#"{{"cwd":"{}","command":["sh","-c","cat readable.txt && printf ro > blocked.txt"],"filesystem":{{}},"stdio":"piped"}}"#,
@@ -2193,7 +2193,7 @@ fn bubblewrap_declared_empty_filesystem_confines_read_only() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn absent_filesystem_block_runs_unsandboxed_regression() {
-    let cwd = unique_project_dir("unsandboxed-regression");
+    let cwd = unique_home_dir("unsandboxed-regression");
     let policy = format!(
         r#"{{"cwd":"{}","command":["sh","-c","printf free > free.txt"],"stdio":"piped"}}"#,
         cwd.display()
