@@ -1,8 +1,18 @@
+## [0.1.45] - 2026-08-26
+
+### 🚀 Features
+
+- *(sandbox)* Confine declared-empty filesystems (#20)
 ## [0.1.44] - 2026-08-05
 
 ### 🐛 Bug Fixes
 
 - *(linux-sandbox)* Open device nodes via --dev-bind (#19)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.44 [ci skip]
+- Release version 0.1.44
 ## [0.1.43] - 2026-06-03
 
 ### 🚀 Features
