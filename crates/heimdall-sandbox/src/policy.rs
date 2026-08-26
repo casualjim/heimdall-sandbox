@@ -198,15 +198,15 @@ pub fn policy_document_request(policy: PolicyDocument) -> Result<ExecRequest> {
         None => current_directory()?,
     };
     ExecRequest::new(cwd, command, allowed_env)
-        .map(|request| {
+        .and_then(|request| {
             request
                 .with_env_policy(env_policy, denied_env)
                 .with_stdio_policy(stdio.unwrap_or(CliStdioPolicy::Inherit).into())
                 .with_network_mode(network_mode)
                 .with_proc_mode(proc_mode)
                 .with_agent_policy(agent_policy)
+                .with_filesystem_policy(filesystem_policy)
         })
-        .and_then(|request| request.with_filesystem_policy(filesystem_policy))
         .map_err(|error| Error::policy(error.to_string()))
 }
 
@@ -232,7 +232,7 @@ pub fn current_directory() -> Result<PathBuf> {
 
 pub(crate) fn validate_sandbox_config(
     config: &SandboxConfig,
-) -> Result<(NetworkMode, ProcMode, FilesystemPolicy, AgentPolicy)> {
+) -> Result<(NetworkMode, ProcMode, Option<FilesystemPolicy>, AgentPolicy)> {
     if config.enabled == Some(false) {
         return Err(Error::arguments(
             "policy enabled=false is not supported by heimdall-sandbox exec",
@@ -257,15 +257,17 @@ pub(crate) fn validate_sandbox_config(
     Ok((network_mode, proc_mode, filesystem_policy, agent_policy))
 }
 
-pub(crate) fn filesystem_policy(filesystem: Option<&PolicyFilesystem>) -> Result<FilesystemPolicy> {
+pub(crate) fn filesystem_policy(
+    filesystem: Option<&PolicyFilesystem>,
+) -> Result<Option<FilesystemPolicy>> {
     let Some(filesystem) = filesystem else {
-        return Ok(FilesystemPolicy::default());
+        return Ok(None);
     };
-    Ok(FilesystemPolicy::new(
+    Ok(Some(FilesystemPolicy::new(
         filesystem.deny.clone().unwrap_or_default(),
         filesystem.writable.clone().unwrap_or_default(),
         filesystem.virtual_files.clone().unwrap_or_default(),
-    ))
+    )))
 }
 
 /// Convert an `ExecArgs` into a core `ExecRequest`.

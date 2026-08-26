@@ -386,14 +386,13 @@ mod tests {
 
         let request = policy_document_request(policy).expect("filesystem isolation converts");
 
-        assert_eq!(
-            request.filesystem_policy().deny(),
-            ["**/.env*", "!**/.env.example"]
-        );
-        assert_eq!(request.filesystem_policy().writable(), ["src/**"]);
+        let filesystem = request
+            .filesystem_policy()
+            .expect("declared block converts");
+        assert_eq!(filesystem.deny(), ["**/.env*", "!**/.env.example"]);
+        assert_eq!(filesystem.writable(), ["src/**"]);
         assert!(
-            request
-                .filesystem_policy()
+            filesystem
                 .virtual_files()
                 .contains_key(&PathBuf::from("/etc/passwd"))
         );
@@ -401,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_document_accepts_omitted_filesystem_fields() {
+    fn declared_empty_filesystem_confines_read_only() {
         let policy = serde_json::from_str::<PolicyDocument>(
             r#"{
               "cwd": ".",
@@ -413,7 +412,50 @@ mod tests {
 
         let request = policy_document_request(policy).expect("empty filesystem converts");
 
-        assert!(request.filesystem_policy().is_empty());
+        let filesystem = request
+            .filesystem_policy()
+            .expect("declared block converts");
+        assert!(filesystem.is_empty());
+        assert!(
+            request.needs_isolation(),
+            "a declared filesystem block is sandbox intent even when empty"
+        );
+    }
+
+    #[test]
+    fn declared_empty_writable_list_confines_read_only() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "cwd": ".",
+              "command": ["printf", "hello"],
+              "filesystem": {"writable": []}
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("empty writable list converts");
+
+        assert!(request.filesystem_policy().is_some());
+        assert!(request.needs_isolation());
+    }
+
+    #[test]
+    fn absent_filesystem_block_does_not_isolate_by_itself() {
+        let policy = serde_json::from_str::<PolicyDocument>(
+            r#"{
+              "cwd": ".",
+              "command": ["printf", "hello"]
+            }"#,
+        )
+        .expect("policy JSON parses");
+
+        let request = policy_document_request(policy).expect("bare policy converts");
+
+        assert!(request.filesystem_policy().is_none());
+        assert!(
+            !request.needs_isolation(),
+            "legacy policies without a filesystem block keep running unsandboxed"
+        );
     }
 
     #[test]

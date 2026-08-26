@@ -142,7 +142,7 @@ impl Executor {
                 StdioPolicy::Inherit => "inherit",
                 StdioPolicy::Piped => "piped",
             },
-            filesystem_policy: request.filesystem_policy(),
+            filesystem_policy: &request.effective_filesystem_policy(),
             proc_mode: request.proc_mode(),
             agent_policy: request.agent_policy(),
         }
@@ -190,7 +190,7 @@ impl Executor {
             cwd: request.cwd(),
             argv: request.argv(),
             network_mode: request.network_mode(),
-            filesystem_policy: request.filesystem_policy(),
+            filesystem_policy: &request.effective_filesystem_policy(),
             proc_mode: request.proc_mode(),
             agent_policy: request.agent_policy(),
         }

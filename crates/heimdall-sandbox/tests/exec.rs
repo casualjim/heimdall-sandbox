@@ -2144,3 +2144,69 @@ fn sigquit_is_forwarded_to_seatbelt_child() {
 fn sigterm_is_forwarded_to_seatbelt_child() {
     assert_seatbelt_signal_is_forwarded("-TERM", "TERM", 48);
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn declared_empty_filesystem_confines_read_only() {
+    let cwd = unique_home_dir("read-only-default");
+    std::fs::write(cwd.join("readable.txt"), "data").expect("seed file written");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","cat readable.txt && printf ro > blocked.txt"],"filesystem":{{}},"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    // The declared-but-empty `filesystem` block is sandbox intent: the child
+    // keeps read access to its cwd but cannot create new files in it.
+    let output = run_policy(&policy);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "write under a declared-empty filesystem must fail; stderr: {stderr}"
+    );
+    assert_eq!(stdout, "data", "cwd reads stay allowed");
+    assert!(
+        !cwd.join("blocked.txt").exists(),
+        "no file may land in the read-only workspace"
+    );
+    std::fs::remove_dir_all(cwd).expect("project temp dir is removed");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_declared_empty_filesystem_confines_read_only() {
+    if !seatbelt_available() {
+        return;
+    }
+    declared_empty_filesystem_confines_read_only();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_declared_empty_filesystem_confines_read_only() {
+    if !bwrap_available() {
+        return;
+    }
+    declared_empty_filesystem_confines_read_only();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn absent_filesystem_block_runs_unsandboxed_regression() {
+    let cwd = unique_home_dir("unsandboxed-regression");
+    let policy = format!(
+        r#"{{"cwd":"{}","command":["sh","-c","printf free > free.txt"],"stdio":"piped"}}"#,
+        cwd.display()
+    );
+
+    // No filesystem key, no other isolation request: legacy policies keep
+    // running without confinement.
+    let output = run_policy(&policy);
+    std::fs::remove_dir_all(cwd).expect("project temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
