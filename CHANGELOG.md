@@ -1,3 +1,9 @@
+## [0.2.0] - 2026-08-27
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.0 [ci skip]
+- Release version 0.2.0
 ## [heimdall-sandbox-v0.1.46] - 2026-08-27
 
 ### 🚀 Features
