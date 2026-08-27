@@ -37,6 +37,7 @@ heimdall-process-hardening = { version = "0.1.45", path = "crates/heimdall-proce
 heimdall-sandbox-policy = { version = "0.1.45", path = "crates/heimdall-sandbox-policy" }
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rustls-tls"] }
 ignore = "0.4.25"
+landlock = "0.4.4"
 libc = "0.2.177"
 ndarray = "0.17.1"
 ort = { version = "=2.0.0-rc.12", features = ["copy-dylibs", "download-binaries", "ndarray"] }

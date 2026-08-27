@@ -6,6 +6,9 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use std::sync::OnceLock;
+
+use crate::landlock::{LandlockSupport, probe_support};
 use crate::launcher::BubblewrapLauncher;
 use crate::policy::{
     AgentPolicy, FilesystemPolicy, FilesystemPolicyMaterializer, MaterializedFilesystemPolicy,
@@ -50,6 +53,261 @@ const GPGCONF_SOCKET_KEYS: &[&str] = &[
     "dirmngr-socket",
 ];
 
+/// How denied and protected paths are enforced for one launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DenyEnforcement {
+    /// Empty readonly mounts mask denied paths: contents hidden, access silent.
+    MaskMounts,
+    /// Landlock rejects reads outside the computed grant universe with EACCES.
+    LandlockReadRejection,
+}
+
+static FALLBACK_WARNING: OnceLock<()> = OnceLock::new();
+
+/// Map probe support to an enforcement decision, warning once on fallback.
+fn enforcement_for_support(has_denials: bool, support: LandlockSupport) -> DenyEnforcement {
+    if !has_denials {
+        return DenyEnforcement::MaskMounts;
+    }
+    match support {
+        LandlockSupport::Available => DenyEnforcement::LandlockReadRejection,
+        LandlockSupport::Unavailable(reason) => {
+            if FALLBACK_WARNING.set(()).is_ok() {
+                eprintln!(
+                    "heimdall-sandbox: landlock unavailable ({reason:?});                      denied paths fall back to empty-directory masking"
+                );
+            }
+            DenyEnforcement::MaskMounts
+        }
+    }
+}
+
+fn resolve_deny_enforcement(has_denials: bool) -> DenyEnforcement {
+    enforcement_for_support(has_denials, probe_support())
+}
+
+/// Extract bubblewrap mount destinations from a prepared argument vector.
+///
+/// Returns every destination plus whether it mirrors a REAL host tree (binds) or is
+/// sandbox-synthetic (tmpfs/created directories), since Landlock grants must follow
+/// host truth while synthetic entries only need to stay traversable.
+fn extract_mount_destinations(args: &[OsString]) -> Vec<(PathBuf, bool)> {
+    const TWO_VALUE_REAL_FLAGS: [&str; 3] = ["--bind", "--ro-bind", "--dev-bind"];
+    const TWO_VALUE_SYNTHETIC_FLAGS: [&str; 1] = ["--ro-bind-data"];
+    const ONE_VALUE_SYNTHETIC_FLAGS: [&str; 5] =
+        ["--tmpfs", "--dir", "--proc", "--dev", "--remount-ro"];
+
+    let mut destinations = Vec::new();
+    let mut skip_next_value = false;
+    let mut index = 0;
+    while index < args.len() {
+        let raw = args[index].to_string_lossy().into_owned();
+        index += 1;
+        if skip_next_value {
+            // Permission-mode style value tokens preceding their owning flag.
+            skip_next_value = false;
+            continue;
+        }
+        if TWO_VALUE_REAL_FLAGS.contains(&raw.as_str()) {
+            index += 1;
+            if let Some(destination) = args.get(index) {
+                let path = PathBuf::from(destination);
+                if path.is_absolute() {
+                    destinations.push((path, true));
+                }
+            }
+            index += 1;
+        } else if TWO_VALUE_SYNTHETIC_FLAGS.contains(&raw.as_str()) {
+            index += 1;
+            if let Some(destination) = args.get(index) {
+                let path = PathBuf::from(destination);
+                if path.is_absolute() {
+                    destinations.push((path, false));
+                }
+            }
+            index += 1;
+        } else if ONE_VALUE_SYNTHETIC_FLAGS.contains(&raw.as_str()) {
+            if let Some(destination) = args.get(index) {
+                let path = PathBuf::from(destination);
+                if path.is_absolute() {
+                    destinations.push((path, false));
+                }
+            }
+            index += 1;
+        } else if raw == "--perms" {
+            skip_next_value = true;
+        }
+    }
+    destinations
+}
+
+/// Compute the Landlock grant universes from extracted mount destinations.
+///
+/// Returns the fully readable trees plus directories that must stay traversable
+/// (execute-only) so paths inside granted trees resolve without exposing their own
+/// listings. Only the filesystem ROOT is treated as pure traversal; mount-seeded
+/// ancestors nearer than it were mounted deliberately and keep full access.
+///
+/// Grants mirror what mount masking used to expose: every mounted tree and its
+/// ancestor chain stay reachable, each denial boundary carves out its own subtree
+/// while keeping unmasked siblings beside it readable, and only corridors that a
+/// restored target - deny negations and writable children - legitimately reopens
+/// are walked back inward. Paths covered by any denial receive no grant, so reads
+/// beneath them fail with EACCES instead of resolving to empty mounts.
+fn expand_read_universe(
+    mounts: &[(PathBuf, bool)],
+    denied: &BTreeSet<PathBuf>,
+    protected: &BTreeSet<PathBuf>,
+    restored: &BTreeSet<PathBuf>,
+) -> (BTreeSet<PathBuf>, BTreeSet<PathBuf>) {
+    let blocked: BTreeSet<PathBuf> = denied.iter().chain(protected.iter()).cloned().collect();
+    let mut universe = BTreeSet::new();
+    let mut traverse: BTreeSet<PathBuf> = BTreeSet::new();
+
+    fn insert_visible(out: &mut BTreeSet<PathBuf>, path: &Path, blocked: &BTreeSet<PathBuf>) {
+        if deepest_blocked_covering(path, blocked).is_none() {
+            out.insert(path.to_path_buf());
+        }
+    }
+
+    // Around every denial: reveal its unmasked siblings in the shared parent scope.
+    for boundary in &blocked {
+        let Some(directory) = boundary.parent() else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            insert_visible(&mut universe, &entry.path(), &blocked);
+        }
+    }
+
+    // Restored targets reopen precisely their own corridor through the masks.
+    for target in restored {
+        if deepest_blocked_covering(target, &blocked).is_some() {
+            grant_corridor(&mut universe, &mut traverse, target, &blocked);
+        }
+    }
+
+    let real_seeds: BTreeSet<PathBuf> = mounts
+        .iter()
+        .filter(|(_, is_real)| *is_real)
+        .map(|(path, _)| path.clone())
+        .collect();
+
+    // Ancestors of every mount stay traversable at minimum; those that mirror REAL
+    // host trees additionally become fully readable when uncovered.
+    for (path, is_real) in mounts {
+        for ancestor in path.ancestors().skip(1) {
+            // Ancestors containing a denial stay traversal-only: granting such a
+            // directory would hand its denied descendants back wholesale.
+            let covered = deepest_blocked_covering(ancestor, &blocked);
+            if covered.is_some() {
+                continue;
+            }
+            let spans = blocked.iter().any(|b| b.starts_with(ancestor));
+            if !spans && *is_real && ancestor.parent().is_some() {
+                universe.insert(ancestor.to_path_buf());
+            }
+            traverse.insert(ancestor.to_path_buf());
+        }
+    }
+
+    for seed in &real_seeds {
+        // A spanning seed stays OUT of readable grants (its real contents would be
+        // exposed), but it must remain resolvable: payloads resolve relative working
+        // directories and cross mounts THROUGH it, so it becomes execute-only.
+        if deepest_blocked_covering(seed, &blocked).is_none() {
+            if blocked.iter().any(|boundary| boundary.starts_with(seed)) {
+                traverse.insert(seed.to_path_buf());
+                grant_spanning_tree(&mut universe, seed, &blocked);
+            } else {
+                insert_visible(&mut universe, seed, &blocked);
+            }
+        }
+    }
+
+    (universe, traverse)
+}
+
+/// Grant every path below `tree` except denial boundaries and their subtrees.
+///
+/// Called only when `tree` is uncovered but contains boundaries deeper down; the
+/// walk stops at each boundary, so denied contents neither resolve nor enumerate.
+fn grant_spanning_tree(out: &mut BTreeSet<PathBuf>, tree: &Path, blocked: &BTreeSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(tree) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if deepest_blocked_covering(&child, blocked).is_some() {
+            continue;
+        }
+        if blocked.iter().any(|boundary| boundary.starts_with(&child)) {
+            grant_spanning_tree(out, &child, blocked);
+        } else {
+            out.insert(child);
+        }
+    }
+}
+
+fn deepest_blocked_covering<'s>(
+    path: &Path,
+    blocked: &'s BTreeSet<PathBuf>,
+) -> Option<&'s PathBuf> {
+    blocked
+        .iter()
+        .filter(|boundary| path.starts_with(boundary.as_path()))
+        .max_by_key(|boundary| boundary.components().count())
+}
+
+/// Grant the directory chain from the outermost denial boundary down to target.
+///
+/// Called only when target lies beneath some denial; intermediate nodes become
+/// individual grants, which is the minimum visibility a restored path needs.
+fn grant_corridor(
+    out: &mut BTreeSet<PathBuf>,
+    out_traverse: &mut BTreeSet<PathBuf>,
+    target: &Path,
+    blocked: &BTreeSet<PathBuf>,
+) {
+    let Some(boundary) = deepest_blocked_covering(target, blocked) else {
+        out.insert(target.to_path_buf());
+        return;
+    };
+
+    let mut node = boundary.clone();
+    let Ok(relative) = target.strip_prefix(&node) else {
+        return;
+    };
+    let total = relative.components().count();
+    for (index, component) in relative.components().enumerate() {
+        node.push(component);
+        match deepest_blocked_covering(&node, blocked) {
+            // Walking beneath the entered boundary is expected along a
+            // legitimate restoration corridor. INTERMEDIATE levels stay
+            // traverse-only so a restored directory never re-admits its
+            // sibling files; only the final restored leaf gets full rights.
+            Some(covered) if covered.as_path() == boundary => {
+                if index + 1 == total {
+                    out.insert(node.clone());
+                } else {
+                    out_traverse.insert(node.clone());
+                }
+            }
+            // A DIFFERENT, deeper denial intercepts the corridor; stop.
+            Some(_) => return,
+            None if index + 1 == total => {
+                out.insert(node.clone());
+            }
+            None => {
+                out_traverse.insert(node.clone());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct AgentRuntimePaths {
     sockets: BTreeSet<PathBuf>,
@@ -73,7 +331,23 @@ impl BubblewrapRequest<'_> {
         materialized: MaterializedFilesystemPolicy,
         bwrap: PathBuf,
     ) -> Result<BubblewrapPlan> {
-        BubblewrapPlanner::new(self).prepare_with_materialized(
+        // Legacy mask-mount semantics pinned so these assertions stay deterministic
+        // on hosts whose kernels support Landlock.
+        self.into_plan_with_enforcement(materialized, bwrap, DenyEnforcement::MaskMounts)
+    }
+
+    #[cfg(test)]
+    fn into_plan_with_enforcement(
+        self,
+        materialized: MaterializedFilesystemPolicy,
+        bwrap: PathBuf,
+        enforcement: DenyEnforcement,
+    ) -> Result<BubblewrapPlan> {
+        BubblewrapPlanner {
+            request: self,
+            enforcement_override: Some(enforcement),
+        }
+        .prepare_with_materialized(
             materialized,
             BubblewrapLauncher {
                 path: bwrap,
@@ -88,17 +362,25 @@ impl BubblewrapRequest<'_> {
         materialized: MaterializedFilesystemPolicy,
         launcher: BubblewrapLauncher,
     ) -> Result<BubblewrapPlan> {
-        BubblewrapPlanner::new(self).prepare_with_materialized(materialized, launcher)
+        BubblewrapPlanner {
+            request: self,
+            enforcement_override: None,
+        }
+        .prepare_with_materialized(materialized, launcher)
     }
 }
 
 struct BubblewrapPlanner<'a> {
     request: BubblewrapRequest<'a>,
+    enforcement_override: Option<DenyEnforcement>,
 }
 
 impl<'a> BubblewrapPlanner<'a> {
     const fn new(request: BubblewrapRequest<'a>) -> Self {
-        Self { request }
+        Self {
+            request,
+            enforcement_override: None,
+        }
     }
 
     fn prepare(self) -> Result<BubblewrapPlan> {
@@ -112,7 +394,11 @@ impl<'a> BubblewrapPlanner<'a> {
             proc_mode,
             ..self.request
         };
-        Ok(DiscoveredBubblewrap { request, launcher })
+        Ok(DiscoveredBubblewrap {
+            request,
+            launcher,
+            enforcement_override: self.enforcement_override,
+        })
     }
 
     #[cfg(test)]
@@ -124,6 +410,7 @@ impl<'a> BubblewrapPlanner<'a> {
         DiscoveredBubblewrap {
             request: self.request,
             launcher,
+            enforcement_override: self.enforcement_override,
         }
         .with_materialized(materialized)
         .prepare_resources()?
@@ -134,6 +421,7 @@ impl<'a> BubblewrapPlanner<'a> {
 struct DiscoveredBubblewrap<'a> {
     request: BubblewrapRequest<'a>,
     launcher: BubblewrapLauncher,
+    enforcement_override: Option<DenyEnforcement>,
 }
 
 impl<'a> DiscoveredBubblewrap<'a> {
@@ -152,6 +440,7 @@ impl<'a> DiscoveredBubblewrap<'a> {
             request: self.request,
             launcher: self.launcher,
             materialized,
+            enforcement_override: self.enforcement_override,
         }
     }
 }
@@ -160,6 +449,7 @@ struct MaterializedBubblewrap<'a> {
     request: BubblewrapRequest<'a>,
     launcher: BubblewrapLauncher,
     materialized: MaterializedFilesystemPolicy,
+    enforcement_override: Option<DenyEnforcement>,
 }
 
 impl<'a> MaterializedBubblewrap<'a> {
@@ -174,6 +464,7 @@ impl<'a> MaterializedBubblewrap<'a> {
             launcher: self.launcher,
             materialized: self.materialized,
             resources,
+            enforcement_override: self.enforcement_override,
         })
     }
 }
@@ -183,15 +474,43 @@ struct PreparedBubblewrap<'a> {
     launcher: BubblewrapLauncher,
     materialized: MaterializedFilesystemPolicy,
     resources: BubblewrapResources,
+    enforcement_override: Option<DenyEnforcement>,
 }
 
 impl PreparedBubblewrap<'_> {
     fn build(self) -> Result<BubblewrapPlan> {
+        let enforcement = self.enforcement_override.unwrap_or_else(|| {
+            let has_denials = !self.materialized.deny_targets().is_empty();
+            // Denied paths whose on-disk identity is a symlink or otherwise
+            // diverges from the policy-literal path keep mount masking: masking
+            // operates on namespace view semantics that survive aliasing, while
+            // Landlock rules anchor on final-object inodes and would leave the
+            // aliased interior readable.
+            let aliased = self
+                .materialized
+                .deny_targets()
+                .iter()
+                .chain(self.materialized.protected_targets())
+                .any(|target| {
+                    std::fs::canonicalize(target)
+                        .map(|canonical| canonical != *target)
+                        .unwrap_or(false)
+                });
+            if has_denials && aliased {
+                DenyEnforcement::MaskMounts
+            } else {
+                resolve_deny_enforcement(has_denials)
+            }
+        });
+        let (read_grants, read_traverse) = self.compute_read_grants(enforcement)?;
         let args = BubblewrapArgBuilder::new(
             &self.request,
             &self.materialized,
             &self.resources,
             &self.launcher,
+            enforcement,
+            read_grants.as_slice(),
+            read_traverse.as_slice(),
         )
         .build()?;
 
@@ -201,6 +520,58 @@ impl PreparedBubblewrap<'_> {
             resources: self.resources,
             missing_deny_guards: self.materialized.missing_deny_guards().clone(),
         })
+    }
+}
+
+impl PreparedBubblewrap<'_> {
+    /// Compute granted read trees plus traversal-only ancestors, empty under masking.
+    fn compute_read_grants(
+        &self,
+        enforcement: DenyEnforcement,
+    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+        if enforcement != DenyEnforcement::LandlockReadRejection {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let staged_args = BubblewrapArgBuilder::new(
+            &self.request,
+            &self.materialized,
+            &self.resources,
+            &self.launcher,
+            enforcement,
+            &[],
+            &[],
+        )
+        .build()?;
+        let mut mounts = extract_mount_destinations(&staged_args);
+        // Synthetic sandbox roots payloads touch at runtime: stdio-null opens
+        // /dev/null and proc-aware tools stat /proc; the namespace tmpfs
+        // instances are what gets ruled here, never host content.
+        mounts.push((PathBuf::from("/dev"), true));
+        mounts.push((PathBuf::from("/proc"), true));
+        mounts.push((PathBuf::from("/tmp"), true));
+        let restored: BTreeSet<PathBuf> = self
+            .materialized
+            .readable_targets()
+            .union(self.materialized.writable_targets())
+            .cloned()
+            .collect();
+        let universe = expand_read_universe(
+            &mounts,
+            self.materialized.deny_targets(),
+            self.materialized.protected_targets(),
+            &restored,
+        );
+
+        if universe.0.is_empty() {
+            return Err(Error::sandbox_misconfiguration(
+                "landlock enforcement requires a non-empty read-grant universe",
+            ));
+        }
+        Ok((
+            universe.0.into_iter().collect(),
+            universe.1.into_iter().collect(),
+        ))
     }
 }
 
@@ -395,6 +766,9 @@ struct BubblewrapArgBuilder<'a> {
     materialized: &'a MaterializedFilesystemPolicy,
     resources: &'a BubblewrapResources,
     launcher: &'a BubblewrapLauncher,
+    enforcement: DenyEnforcement,
+    read_grants: &'a [PathBuf],
+    read_traverse: &'a [PathBuf],
     args: Vec<OsString>,
 }
 
@@ -404,12 +778,18 @@ impl<'a> BubblewrapArgBuilder<'a> {
         materialized: &'a MaterializedFilesystemPolicy,
         resources: &'a BubblewrapResources,
         launcher: &'a BubblewrapLauncher,
+        enforcement: DenyEnforcement,
+        read_grants: &'a [PathBuf],
+        read_traverse: &'a [PathBuf],
     ) -> Self {
         Self {
             request,
             materialized,
             resources,
             launcher,
+            enforcement,
+            read_grants,
+            read_traverse,
             args: Vec::new(),
         }
     }
@@ -490,14 +870,16 @@ impl<'a> BubblewrapArgBuilder<'a> {
                 .iter()
                 .map(PolicyMount::virtual_file),
         );
-        mounts.extend(self.materialized.deny_targets().iter().map(|path| {
-            let source = if path.is_dir() {
-                empty_dir.as_path()
-            } else {
-                empty_file.as_path()
-            };
-            PolicyMount::deny(source, path)
-        }));
+        if self.enforcement == DenyEnforcement::MaskMounts {
+            mounts.extend(self.materialized.deny_targets().iter().map(|path| {
+                let source = if path.is_dir() {
+                    empty_dir.as_path()
+                } else {
+                    empty_file.as_path()
+                };
+                PolicyMount::deny(source, path)
+            }));
+        }
         mounts.extend(
             self.materialized
                 .missing_deny_guards()
@@ -508,14 +890,16 @@ impl<'a> BubblewrapArgBuilder<'a> {
                     kind: PolicyMountKind::MissingDenyGuard,
                 }),
         );
-        mounts.extend(self.materialized.protected_targets().iter().map(|path| {
-            let source = if path.exists() && !path.is_dir() {
-                empty_file.as_path()
-            } else {
-                empty_dir.as_path()
-            };
-            PolicyMount::protected(source, path)
-        }));
+        if self.enforcement == DenyEnforcement::MaskMounts {
+            mounts.extend(self.materialized.protected_targets().iter().map(|path| {
+                let source = if path.exists() && !path.is_dir() {
+                    empty_file.as_path()
+                } else {
+                    empty_dir.as_path()
+                };
+                PolicyMount::protected(source, path)
+            }));
+        }
         mounts.extend(
             agent_runtime_paths
                 .readable_dirs
@@ -677,6 +1061,16 @@ impl<'a> BubblewrapArgBuilder<'a> {
         self.args.push(self.request.cwd.as_os_str().to_os_string());
         self.args.push("--stdio".into());
         self.args.push(self.request.stdio_policy.into());
+        // Landlock grants ride the inner re-entry argv: bwrap only accepts its own
+        // options before the namespace terminator.
+        for grant in self.read_grants {
+            self.args.push("--read-grant".into());
+            self.args.push(grant.as_os_str().to_os_string());
+        }
+        for directory in self.read_traverse {
+            self.args.push("--read-traverse".into());
+            self.args.push(directory.as_os_str().to_os_string());
+        }
         self.args.push("--".into());
         self.args
             .extend(self.request.argv.iter().map(OsString::from));
@@ -1707,5 +2101,165 @@ mod tests {
             (w[0] == "--ro-bind" || w[0] == "--bind") && w[2] == denied.to_string_lossy()
         }));
         std::fs::remove_dir_all(&root).expect("test dirs removed");
+    }
+
+    #[test]
+    fn extract_mount_destinations_covers_mount_vocabulary() {
+        let args: Vec<OsString> = [
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--bind",
+            "/src",
+            "/dst",
+            "--dev-bind",
+            "/dev/null",
+            "/dev/null",
+            "--ro-bind-data",
+            "7",
+            "/etc/passwd",
+            "--tmpfs",
+            "/tmp",
+            "--dir",
+            "/staged/child",
+            "--perms",
+            "1777",
+            "--tmpfs",
+            "/var/tmp",
+            "--",
+            "payload",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        let mounts = extract_mount_destinations(&args);
+
+        assert!(mounts.contains(&(PathBuf::from("/usr"), true)));
+        assert!(mounts.contains(&(PathBuf::from("/dst"), true)));
+        assert!(mounts.contains(&(PathBuf::from("/dev/null"), true)));
+        assert!(mounts.contains(&(PathBuf::from("/etc/passwd"), false)));
+        assert!(mounts.contains(&(PathBuf::from("/tmp"), false)));
+        assert!(mounts.contains(&(PathBuf::from("/staged/child"), false)));
+        assert!(mounts.contains(&(PathBuf::from("/var/tmp"), false)));
+    }
+
+    #[test]
+    fn expand_universe_widens_siblings_and_reopens_only_restored_corridors() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-universe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        for directory in [
+            home.join(".ssh"),
+            home.join(".config/mise"),
+            home.join(".config/nvim"),
+            home.join(".config/private"),
+            home.join("projects/lib"),
+        ] {
+            std::fs::create_dir_all(&directory).expect("layout created");
+        }
+        std::fs::write(home.join(".gitconfig"), "[user]").expect("gitconfig written");
+        std::fs::write(home.join(".ssh/id_ed25519"), "key").expect("key written");
+        std::fs::write(home.join(".config/mise/config.toml"), "ok").expect("negated written");
+        std::fs::write(home.join(".config/private/ledger"), "hush").expect("hidden written");
+
+        let mounts = vec![(home.clone(), true)];
+        let denied = BTreeSet::from([home.join(".ssh"), home.join(".config")]);
+        let restored = BTreeSet::from([
+            home.join(".config/mise/config.toml"),
+            home.join(".config/nvim"),
+        ]);
+        let (universe, traverse) =
+            expand_read_universe(&mounts, &denied, &BTreeSet::new(), &restored);
+
+        // Ordinary neighbors stay readable without granting the enclosing tree.
+        assert!(universe.contains(&home.join(".gitconfig")));
+        assert!(universe.contains(&home.join("projects")));
+        assert!(!universe.contains(&home));
+        // Denied subtrees expose only their restored corridors.
+        assert!(universe.contains(&home.join(".config/mise/config.toml")));
+        assert!(traverse.contains(&home.join(".config/mise")));
+        assert!(universe.contains(&home.join(".config/nvim")));
+        assert!(!universe.contains(&home.join(".config/private")));
+        assert!(!universe.contains(&home.join(".config")));
+        assert!(
+            !universe
+                .iter()
+                .any(|path| path.starts_with(home.join(".ssh")))
+        );
+        // The strict filesystem root remains an execute-only traversal node.
+        assert!(traverse.contains(Path::new("/")));
+        std::fs::remove_dir_all(&root).expect("layout removed");
+    }
+
+    #[test]
+    fn landlock_enforcement_drops_masks_and_plans_read_grants() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-landlock-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let denied = root.join(".secret");
+        std::fs::create_dir_all(&denied).expect("denied dir created");
+        let materialized = MaterializedFilesystemPolicy::new(
+            BTreeSet::from([denied.clone()]),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+        let cwd = std::env::current_dir().expect("cwd exists");
+        let request = BubblewrapRequest {
+            cwd: &cwd,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &FilesystemPolicy::default(),
+            proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
+        };
+        let plan = request
+            .into_plan_with_enforcement(
+                materialized,
+                existing_bwrap_path(),
+                DenyEnforcement::LandlockReadRejection,
+            )
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("denied dir removed");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !args
+                .windows(3)
+                .any(|w| (w[0] == "--ro-bind" || w[0] == "--bind")
+                    && w[2] == denied.to_string_lossy()),
+            "mask mounts are replaced by landlock grants"
+        );
+        let grants: Vec<_> = args
+            .windows(2)
+            .filter_map(|w| {
+                (w[0] == "--read-grant" || w[0] == "--read-traverse")
+                    .then(|| w[1].to_string())
+                    .or(None)
+            })
+            .collect();
+        assert!(
+            !grants.is_empty(),
+            "landlock plans must carry read-grant roots"
+        );
+        assert!(
+            !grants
+                .iter()
+                .any(|grant| Path::new(grant.as_str()) == denied),
+            "denied paths never appear among grants"
+        );
     }
 }

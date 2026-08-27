@@ -6,6 +6,7 @@ A cross-platform process sandbox runtime written in Rust. Heimdall executes untr
 
 - **Cross-platform isolation** — bubblewrap on Linux, Seatbelt on macOS
 - **Filesystem isolation** — deny patterns, writable overlays, and virtual file injection using gitignore-style globs
+- **Denied paths reject, not hide** — on Linux kernels with Landlock (≥ 5.13), denied file and subdirectory access fails loudly with `Permission denied`; the denied entry NAME itself may remain visible through parent listings on ABI ≥ 10 kernels (a Landlock granularity change), while kernels 5.13–6.11 deny listings too. Kernels without usable Landlock fall back to empty-directory masking: denied contents hidden, access silent
 - **Network isolation** — disable host networking inside the sandbox
 - **Environment filtering** — allowlist by default, or blocklist with explicit deny rules
 - **Process hardening** — disable ptrace attachment, zero core file limits, and strip dangerous loader/allocator environment variables
