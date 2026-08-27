@@ -99,7 +99,7 @@ where
 }
 
 fn run_cli(cli: Cli) -> i32 {
-    let Cli { command } = cli;
+    let Cli { mut command } = cli;
 
     if let Commands::Policy(args) = command {
         return match commands::policy::run_policy_command(args) {
@@ -117,6 +117,37 @@ fn run_cli(cli: Cli) -> i32 {
 
     if let Commands::PrivacyFilter(args) = command {
         return commands::privacy_filter::run_privacy_filter_command(args);
+    }
+
+    // The Linux re-entry applies the planned Landlock read-grant universe in this
+    // process; spawned payloads inherit the restriction across fork and execve, so
+    // denied filesystem paths surface as EACCES instead of empty mounts.
+    #[cfg(target_os = "linux")]
+    if let Commands::InnerExec(mut args) = command {
+        let read_grants = std::mem::take(&mut args.read_grant);
+        let read_traverse = std::mem::take(&mut args.read_traverse);
+        if !read_grants.is_empty() {
+            // Bare command names resolve through PATH inside this (already
+            // confined) view; every PATH directory present here joins the grant
+            // set so trusted interpreters keep resolving and executing.
+            let mut granted = read_grants;
+            if let Some(paths) = std::env::var_os("PATH") {
+                for directory in std::env::split_paths(&paths) {
+                    // ponytail: grant every absolute PATH dir; missing ones get
+                    // lookup-only ancestor rules in landlock.rs, never read access.
+                    if directory.is_absolute() {
+                        granted.push(directory);
+                    }
+                }
+                granted.sort();
+                granted.dedup();
+            }
+            if let Err(error) = heimdall_core::restrict_fs_read_universe(&granted, &read_traverse) {
+                eprintln!("sandbox landlock enforcement failed: {error}");
+                return SANDBOX_MISCONFIGURATION_EXIT_CODE;
+            }
+        }
+        command = Commands::InnerExec(args);
     }
 
     if let Err(error) = heimdall_process_hardening::apply_process_hardening() {

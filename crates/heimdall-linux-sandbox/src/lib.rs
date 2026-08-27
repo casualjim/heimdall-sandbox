@@ -1,9 +1,14 @@
 //! Linux bubblewrap sandbox planning and filesystem policy materialization.
 
+mod landlock;
 mod launcher;
 mod plan;
 mod policy;
 mod virtual_files;
+
+pub use landlock::{
+    LandlockSupport, LandlockUnavailableReason, probe_support, restrict_fs_read_universe,
+};
 
 use thiserror::Error as ThisError;
 
