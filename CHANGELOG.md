@@ -1,8 +1,22 @@
+## [heimdall-sandbox-v0.1.46] - 2026-08-27
+
+### 🚀 Features
+
+- *(linux)* Reject denied paths via landlock (#21)
+
+### ⚙️ Miscellaneous Tasks
+
+- Release version 0.1.46
 ## [0.1.45] - 2026-08-26
 
 ### 🚀 Features
 
 - *(sandbox)* Confine declared-empty filesystems (#20)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.45 [ci skip]
+- Release version 0.1.45
 ## [0.1.44] - 2026-08-05
 
 ### 🐛 Bug Fixes
