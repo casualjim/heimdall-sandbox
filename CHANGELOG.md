@@ -1,3 +1,14 @@
+## [0.2.2] - 2026-08-27
+
+### 🐛 Bug Fixes
+
+- Keep writable roots on a single bind mount instance (#22)
+## [0.2.1] - 2026-08-27
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.1 [ci skip]
+- Release version 0.2.1
 ## [0.2.0] - 2026-08-27
 
 ### ⚙️ Miscellaneous Tasks
