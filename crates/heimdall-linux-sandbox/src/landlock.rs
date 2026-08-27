@@ -49,7 +49,7 @@ pub fn probe_support() -> LandlockSupport {
     use landlock::{AccessFs, Compatible, Ruleset, RulesetAttr, make_bitflags};
 
     const HANDLED_ACCESS: landlock::BitFlags<AccessFs> =
-        make_bitflags!(AccessFs::{Execute | ReadFile | ReadDir});
+        make_bitflags!(AccessFs::{Execute | ReadFile | ReadDir | Refer});
 
     // Creating a ruleset exercises the real syscalls: ENOSYS/EOPNOTSUPP here means
     // enforcement is impossible and callers must keep mount masking.
@@ -101,8 +101,18 @@ pub fn restrict_fs_read_universe(
         ));
     }
 
+    // Refer must be handled AND granted: Landlock denies link(2)/rename(2)
+    // reparenting with EXDEV for every enforced ruleset unless this right is
+    // explicitly handled and allowed on both parent directories. Without it,
+    // every cross-directory hardlink inside a writable workspace fails
+    // (cargo's incremental working copy is the loudest victim).
+    // Refer must be handled AND granted: Landlock denies link(2)/rename(2)
+    // reparenting with EXDEV for every enforced ruleset unless this right is
+    // explicitly handled and allowed on both parent directories. Without it,
+    // every cross-directory hardlink inside a writable workspace fails
+    // (cargo's incremental working copy is the loudest victim).
     const HANDLED_ACCESS: landlock::BitFlags<AccessFs> =
-        make_bitflags!(AccessFs::{Execute | ReadFile | ReadDir});
+        make_bitflags!(AccessFs::{Execute | ReadFile | ReadDir | Refer});
     const EXECUTE_ONLY: landlock::BitFlags<AccessFs> = make_bitflags!(AccessFs::Execute);
 
     let open_root = |path: &std::path::Path| -> std::io::Result<PathFd> {
@@ -287,6 +297,33 @@ mod linux_tests {
         let denied =
             std::fs::read_to_string(secret.join("key.txt")).expect_err("denied read must fail");
         assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn cross_directory_links_and_renames_survive_restriction() {
+        if probe_support() != LandlockSupport::Available {
+            return;
+        }
+        let dir = stage("refer");
+        let seeds = vec![dir.join("open")];
+        restrict_fs_read_universe(&seeds, &[]).expect("landlock restriction applies");
+
+        // Landlock denies reparenting link(2)/rename(2) with EXDEV unless the
+        // Refer right is handled and granted; the workspace must keep both.
+        std::fs::hard_link(
+            dir.join("open/sub/file.txt"),
+            dir.join("open/file-link.txt"),
+        )
+        .expect("cross-directory hardlink inside granted root");
+        std::fs::rename(
+            dir.join("open/file-link.txt"),
+            dir.join("open/sub/file-renamed.txt"),
+        )
+        .expect("cross-directory rename inside granted root");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("open/sub/file-renamed.txt")).expect("linked read"),
+            "payload"
+        );
     }
 
     #[test]
