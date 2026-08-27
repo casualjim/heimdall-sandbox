@@ -591,6 +591,47 @@ fn bubblewrap_writable_patterns_allow_edits_and_creation() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn bubblewrap_nested_writable_roots_stay_one_filesystem() {
+    if !bwrap_available() {
+        return;
+    }
+    let parent = unique_temp_dir("bwrap-exdev-parent");
+    let child = parent.join("child");
+    std::fs::create_dir(&child).expect("child directory is created");
+    std::fs::write(parent.join("a"), "hi").expect("source file is written");
+    let policy = serde_json::json!({
+        "cwd": child,
+        "command": [
+            "sh",
+            "-c",
+            "ln ../a b && mv b renamed && printf LINK-RENAME-OK",
+        ],
+        "filesystem": {
+            "writable": [parent, child],
+        },
+        "stdio": "piped",
+    })
+    .to_string();
+
+    let output = run_policy(&policy);
+    let linked = std::fs::read_to_string(child.join("renamed")).unwrap_or_default();
+    std::fs::remove_dir_all(parent).expect("temp dir is removed");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "LINK-RENAME-OK",
+        "hardlink and rename across nested writable roots must not hit EXDEV"
+    );
+    assert_eq!(linked, "hi");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn bubblewrap_missing_absolute_deny_under_writable_blocks_creation() {
     if !bwrap_available() {
         return;

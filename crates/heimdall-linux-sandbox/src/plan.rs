@@ -761,6 +761,22 @@ impl PolicyMountKind {
     }
 }
 
+/// Reduce a sorted target set to its outermost paths.
+///
+/// A target nested inside another target needs no separate bind: the outer rw
+/// bind already covers it, and a second bind of the same tree would create a
+/// distinct mount instance, making rename(2)/link(2) inside the tree fail with
+/// EXDEV even on a single host filesystem.
+fn outermost_targets(targets: &BTreeSet<PathBuf>) -> Vec<&Path> {
+    let mut outermost: Vec<&Path> = Vec::new();
+    for target in targets {
+        if !outermost.iter().any(|kept| target.starts_with(kept)) {
+            outermost.push(target.as_path());
+        }
+    }
+    outermost
+}
+
 struct BubblewrapArgBuilder<'a> {
     request: &'a BubblewrapRequest<'a>,
     materialized: &'a MaterializedFilesystemPolicy,
@@ -846,17 +862,26 @@ impl<'a> BubblewrapArgBuilder<'a> {
     }
 
     fn add_policy_mounts(&mut self) -> Result<()> {
-        self.ro_bind(self.request.cwd, self.request.cwd);
+        // A writable bind covering the cwd already restores its visibility; an
+        // additional ro-bind of the same tree would stack a second mount
+        // instance, so rename(2)/link(2) across it would fail with EXDEV.
+        let cwd_covered_by_writable = self
+            .materialized
+            .writable_targets()
+            .iter()
+            .any(|root| self.request.cwd == *root || self.request.cwd.starts_with(root));
+        if !cwd_covered_by_writable {
+            self.ro_bind(self.request.cwd, self.request.cwd);
+        }
 
         let empty_file = self.resources.empty_file();
         let empty_dir = self.resources.empty_dir();
         let agent_runtime_paths = Self::agent_runtime_paths(self.request.agent_policy)?;
         let mut mounts = Vec::new();
         mounts.extend(
-            self.materialized
-                .writable_targets()
-                .iter()
-                .map(|path| PolicyMount::writable(path.as_path())),
+            outermost_targets(self.materialized.writable_targets())
+                .into_iter()
+                .map(PolicyMount::writable),
         );
         mounts.extend(
             self.materialized
@@ -1856,8 +1881,7 @@ mod tests {
             .collect::<Vec<_>>();
         let ro_cwd = args
             .windows(3)
-            .position(|w| w[0] == "--ro-bind" && w[2] == cwd.to_string_lossy())
-            .expect("cwd ro-bind exists");
+            .position(|w| w[0] == "--ro-bind" && w[2] == cwd.to_string_lossy());
         let rw_cwd = args
             .windows(3)
             .position(|w| w[0] == "--bind" && w[2] == cwd.to_string_lossy())
@@ -1867,8 +1891,65 @@ mod tests {
             .position(|w| w[0] == "--ro-bind" && w[2] == denied.to_string_lossy())
             .expect("deny mask exists");
 
-        assert!(ro_cwd < rw_cwd);
+        // A writable cwd is restored by its own rw bind; a second ro-bind of
+        // the same tree would stack mount instances and break rename/link.
+        assert_eq!(ro_cwd, None, "writable cwd must not also be ro-bound");
         assert!(rw_cwd < deny);
+    }
+
+    #[test]
+    fn plan_collapses_nested_writable_mounts() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-nested-writable-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).expect("test dirs created");
+        let request = BubblewrapRequest {
+            cwd: &child,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &FilesystemPolicy::new(Vec::new(), Vec::new(), Default::default()),
+            proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
+        };
+        let plan = request
+            .into_plan_with_bwrap(
+                MaterializedFilesystemPolicy::new(
+                    BTreeSet::new(),
+                    BTreeSet::from([root.clone(), child.clone()]),
+                    BTreeSet::new(),
+                ),
+                existing_bwrap_path(),
+            )
+            .expect("plan builds");
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        let bind_child = args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[2] == child.to_string_lossy());
+        let ro_child = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[2] == child.to_string_lossy());
+        assert!(
+            args.windows(3)
+                .any(|w| w[0] == "--bind" && w[2] == root.to_string_lossy()),
+            "outermost writable root is bound"
+        );
+        assert_eq!(bind_child, None, "nested writable root needs no own bind");
+        assert_eq!(
+            ro_child, None,
+            "writable cwd under writable root is not ro-bound"
+        );
     }
 
     #[test]
