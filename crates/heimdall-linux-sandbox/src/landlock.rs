@@ -113,7 +113,11 @@ pub fn restrict_fs_read_universe(
     // (cargo's incremental working copy is the loudest victim).
     const HANDLED_ACCESS: landlock::BitFlags<AccessFs> =
         make_bitflags!(AccessFs::{Execute | ReadFile | ReadDir | Refer});
-    const EXECUTE_ONLY: landlock::BitFlags<AccessFs> = make_bitflags!(AccessFs::Execute);
+    // Traversal-only ancestors must also open O_RDONLY: tools that walk their
+    // cwd's parents at startup (bun 1.3.14's current-directory check, realpath
+    // implementations) abort on EACCES. Files beneath stay ReadFile-denied.
+    const EXECUTE_AND_READ_DIR: landlock::BitFlags<AccessFs> =
+        make_bitflags!(AccessFs::{Execute | ReadDir});
 
     let open_root = |path: &std::path::Path| -> std::io::Result<PathFd> {
         PathFd::new(path).map_err(|error| {
@@ -152,7 +156,7 @@ pub fn restrict_fs_read_universe(
                 for ancestor in root.ancestors().skip(1) {
                     match PathFd::new(ancestor) {
                         Ok(parent) => {
-                            if add_rule(&mut created, parent, EXECUTE_ONLY).is_ok() {
+                            if add_rule(&mut created, parent, EXECUTE_AND_READ_DIR).is_ok() {
                                 narrowed = Ok(());
                                 break;
                             }
@@ -175,7 +179,7 @@ pub fn restrict_fs_read_universe(
             continue;
         }
         if let Ok(parent) = PathFd::new(directory) {
-            add_rule(&mut created, parent, EXECUTE_ONLY)?;
+            add_rule(&mut created, parent, EXECUTE_AND_READ_DIR)?;
         }
     }
 
@@ -330,5 +334,39 @@ mod linux_tests {
     fn empty_root_set_is_rejected_rather_than_locking_out_everything() {
         let error = restrict_fs_read_universe(&[], &[]).expect_err("empty universe rejected");
         assert!(error.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn traverse_only_ancestors_open_readonly_and_files_beneath_stay_denied() {
+        if probe_support() != LandlockSupport::Available {
+            return;
+        }
+        let dir = stage("traverse");
+        let seeds = vec![dir.join("open")];
+        let traverse_only = vec![dir.clone()];
+        restrict_fs_read_universe(&seeds, &traverse_only).expect("landlock restriction applies");
+
+        // bun-style cwd-parent walk: the traverse-only ancestor must open
+        // O_RDONLY|O_DIRECTORY (read_dir is the same open(2) path) and list
+        // its directory names instead of dying with EACCES.
+        let listed: Vec<String> = std::fs::read_dir(&dir)
+            .expect("traverse-only directory must open O_RDONLY")
+            .map(|entry| {
+                entry
+                    .expect("stage entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            listed.iter().any(|name| name == "secret"),
+            "names visible: {listed:?}"
+        );
+
+        // Content beneath the traverse-only ancestor stays ReadFile-denied.
+        let denied =
+            std::fs::read_to_string(dir.join("secret/key.txt")).expect_err("denied read must fail");
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }
