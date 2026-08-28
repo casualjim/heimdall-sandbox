@@ -1,8 +1,18 @@
+## [0.2.4] - 2026-08-28
+
+### 🐛 Bug Fixes
+
+- *(landlock)* Allow ReadDir on traverse ancestors (#24)
 ## [0.2.3] - 2026-08-27
 
 ### 🐛 Bug Fixes
 
 - *(sandbox)* Allow landlock refer for link/rename (#23)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.3 [ci skip]
+- Release version 0.2.3
 ## [0.2.2] - 2026-08-27
 
 ### 🐛 Bug Fixes
