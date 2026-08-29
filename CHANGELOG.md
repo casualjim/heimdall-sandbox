@@ -1,8 +1,18 @@
+## [0.2.5] - 2026-08-29
+
+### 🐛 Bug Fixes
+
+- *(seatbelt)* Allow route sockets under network host (#25)
 ## [0.2.4] - 2026-08-28
 
 ### 🐛 Bug Fixes
 
 - *(landlock)* Allow ReadDir on traverse ancestors (#24)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.4 [ci skip]
+- Release version 0.2.4
 ## [0.2.3] - 2026-08-27
 
 ### 🐛 Bug Fixes
