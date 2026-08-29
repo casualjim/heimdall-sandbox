@@ -99,7 +99,7 @@ where
 }
 
 fn run_cli(cli: Cli) -> i32 {
-    let Cli { mut command } = cli;
+    let Cli { command } = cli;
 
     if let Commands::Policy(args) = command {
         return match commands::policy::run_policy_command(args) {

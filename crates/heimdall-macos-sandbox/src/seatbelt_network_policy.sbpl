@@ -10,6 +10,12 @@
   )
 )
 
+; route-table monitoring (netstat, iroh netwatch) reads change notifications;
+; the kernel rejects route mutations from unprivileged processes.
+(allow system-socket
+  (socket-domain AF_ROUTE)
+)
+
 (allow mach-lookup
     ; Used by platform helpers that resolve user directory locations.
     (global-name "com.apple.bsd.dirhelper")

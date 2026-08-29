@@ -1186,6 +1186,7 @@ mod tests {
         let policy = policy_arg(plan.args());
 
         assert!(policy.contains("(allow network-outbound)\n(allow network-inbound)"));
+        assert!(policy.contains("(allow system-socket\n  (socket-domain AF_ROUTE)\n)"));
         assert!(policy.contains("com.apple.SecurityServer"));
     }
 
