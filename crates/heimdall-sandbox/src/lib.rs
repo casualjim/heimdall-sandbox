@@ -99,7 +99,7 @@ where
 }
 
 fn run_cli(cli: Cli) -> i32 {
-    let Cli { mut command } = cli;
+    let Cli { command } = cli;
 
     if let Commands::Policy(args) = command {
         return match commands::policy::run_policy_command(args) {
@@ -122,8 +122,9 @@ fn run_cli(cli: Cli) -> i32 {
     // The Linux re-entry applies the planned Landlock read-grant universe in this
     // process; spawned payloads inherit the restriction across fork and execve, so
     // denied filesystem paths surface as EACCES instead of empty mounts.
+    // Shadowed (not mutated) so macOS builds never carry an unused-mut flag.
     #[cfg(target_os = "linux")]
-    if let Commands::InnerExec(mut args) = command {
+    let command = if let Commands::InnerExec(mut args) = command {
         let read_grants = std::mem::take(&mut args.read_grant);
         let read_traverse = std::mem::take(&mut args.read_traverse);
         if !read_grants.is_empty() {
@@ -147,8 +148,10 @@ fn run_cli(cli: Cli) -> i32 {
                 return SANDBOX_MISCONFIGURATION_EXIT_CODE;
             }
         }
-        command = Commands::InnerExec(args);
-    }
+        Commands::InnerExec(args)
+    } else {
+        command
+    };
 
     if let Err(error) = heimdall_process_hardening::apply_process_hardening() {
         eprintln!("sandbox hardening failed: {error}");
