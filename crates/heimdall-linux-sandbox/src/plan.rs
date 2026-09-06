@@ -2185,6 +2185,65 @@ mod tests {
     }
 
     #[test]
+    fn negated_writable_child_under_denied_parent_is_not_ro_shadowed() {
+        let root = std::env::temp_dir().join(format!(
+            "heimdall-bwrap-negated-writable-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ));
+        let denied = root.join(".config");
+        let writable = denied.join(".wrangler");
+        std::fs::create_dir_all(&writable).expect("denied parent and writable child created");
+        let policy = FilesystemPolicy::new(
+            vec![
+                denied.to_string_lossy().to_string(),
+                format!("!{}", writable.display()),
+            ],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&root, &policy)
+            .materialize()
+            .expect("policy materializes");
+        let request = BubblewrapRequest {
+            cwd: &root,
+            argv: &["true".into()],
+            network_mode: NetworkMode::Host,
+            stdio_policy: "inherit",
+            filesystem_policy: &policy,
+            proc_mode: ProcMode::Default,
+            agent_policy: AgentPolicy::default(),
+        };
+        let plan = request
+            .into_plan_with_enforcement(
+                materialized,
+                existing_bwrap_path(),
+                DenyEnforcement::LandlockReadRejection,
+            )
+            .expect("plan builds");
+        let args = plan
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.windows(3)
+                .any(|w| w[0] == "--bind" && w[2] == writable.to_string_lossy()),
+            "writable child keeps its rw bind"
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind" && w[2] == writable.to_string_lossy()),
+            "a read-only rebind of the same path would stack over the rw bind"
+        );
+        std::fs::remove_dir_all(&root).expect("test dirs removed");
+    }
+
+    #[test]
     fn extract_mount_destinations_covers_mount_vocabulary() {
         let args: Vec<OsString> = [
             "--ro-bind",
