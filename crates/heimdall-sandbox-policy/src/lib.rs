@@ -438,7 +438,8 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             &deny_literal_patterns,
             &writable_literal_patterns,
         );
-        let readable_targets = self.readable_targets(&deny_targets, &deny_literal_patterns)?;
+        let readable_targets =
+            self.readable_targets(&deny_targets, &deny_literal_patterns, &writable_targets)?;
         self.prune_redundant_deny_targets(&mut deny_targets);
 
         let protected_targets = self.protected_control_targets(&writable, &deny)?;
@@ -715,11 +716,16 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             }
         }
     }
-
+    /// Deny-negation corridors (`!pattern`) beneath a denied directory, reopened read-only.
+    ///
+    /// Paths already covered by a writable target are excluded: the writable bind grants
+    /// read access too, and a read-only rebind of the same path would stack over the
+    /// writable bind and silently demote it to read-only.
     fn readable_targets(
         &self,
         deny_targets: &BTreeSet<PathBuf>,
         deny_patterns: &[String],
+        writable_targets: &BTreeSet<PathBuf>,
     ) -> Result<BTreeSet<PathBuf>> {
         let mut targets = BTreeSet::new();
         for pattern in deny_patterns {
@@ -734,6 +740,9 @@ impl<'a> FilesystemPolicyMaterializer<'a> {
             };
             if concrete_path_state(&path)?.is_existing()
                 && has_denied_directory_ancestor(&path, deny_targets)
+                && !writable_targets
+                    .iter()
+                    .any(|writable| path.starts_with(writable))
             {
                 targets.insert(path);
             }
@@ -1197,6 +1206,32 @@ mod tests {
         assert!(materialized.writable_targets().contains(&external));
         std::fs::remove_dir_all(cwd).expect("temp dir removed");
         std::fs::remove_dir_all(external).expect("external dir removed");
+    }
+
+    #[test]
+    fn negated_deny_child_covered_by_writable_is_not_readable_target() {
+        let cwd = unique_dir("negated-writable-readable");
+        let denied = cwd.join("denied");
+        let writable = denied.join("child");
+        std::fs::create_dir_all(&writable).expect("denied parent and writable child created");
+        let policy = FilesystemPolicy::new(
+            vec![
+                denied.to_string_lossy().to_string(),
+                format!("!{}", writable.display()),
+            ],
+            vec![writable.to_string_lossy().to_string()],
+            Default::default(),
+        );
+        let materialized = FilesystemPolicyMaterializer::new(&cwd, &policy)
+            .materialize()
+            .expect("policy materializes");
+
+        assert!(materialized.writable_targets().contains(&writable));
+        assert!(
+            !materialized.readable_targets().contains(&writable),
+            "a writable target must never also become a read-only corridor"
+        );
+        std::fs::remove_dir_all(cwd).expect("temp dir removed");
     }
 
     #[test]
