@@ -1,8 +1,18 @@
+## [0.2.6] - 2026-09-07
+
+### 🐛 Bug Fixes
+
+- *(sandbox)* Stop readonly rebind from shadowing writable negated deny (#26)
 ## [0.2.5] - 2026-08-29
 
 ### 🐛 Bug Fixes
 
 - *(seatbelt)* Allow route sockets under network host (#25)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.5 [ci skip]
+- Release version 0.2.5
 ## [0.2.4] - 2026-08-28
 
 ### 🐛 Bug Fixes
