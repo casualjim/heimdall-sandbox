@@ -4,9 +4,10 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use heimdall_model_runtime::session::ExecutionProvider;
 use heimdall_privacy_filter::{
-    DEFAULT_MODEL_REVISION, PrivacyExecutionProvider, PrivacyFilterConfig, PrivacyFilterRuntime,
-    PrivacyFilterVariant, redact_text,
+    DEFAULT_MODEL_REVISION, PrivacyFilterConfig, PrivacyFilterRuntime, PrivacyFilterVariant,
+    redact_text,
 };
 
 use super::cli_privacy_types::{CliExecutionProvider, CliPrivacyVariant};
@@ -83,7 +84,7 @@ fn run_redact_command(args: RedactArgs) -> i32 {
     let mut config = PrivacyFilterConfig::enabled()
         .with_variant(PrivacyFilterVariant::from(variant))
         .with_revision(&revision)
-        .with_execution_provider(PrivacyExecutionProvider::from(execution_provider));
+        .with_execution_provider(ExecutionProvider::from(execution_provider));
     if let Some(cache_dir) = cache_dir {
         config = config.with_cache_dir(cache_dir);
     }
@@ -121,7 +122,7 @@ fn run_redact_command(args: RedactArgs) -> i32 {
 /// - `Some(arg)` literal text → use as-is
 /// - `None` + stdin is a pipe/redirect → read stdin
 /// - `None` + stdin is a terminal → error
-fn read_input(input: Option<String>) -> Result<String, String> {
+pub(super) fn read_input(input: Option<String>) -> Result<String, String> {
     if let Some(arg) = input {
         let path = PathBuf::from(&arg);
         if path.is_file() {

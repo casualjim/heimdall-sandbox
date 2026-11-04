@@ -3,3 +3,8 @@
 retries = 3
 # Any test that runs longer than 30 seconds is considered hung.
 slow-timeout = { period = "30s", terminate-after = 1 }
+
+# The injection classifier is a 563 MB fp32 model; loading it in parallel test processes is slow.
+[[profile.default.overrides]]
+filter = "package(heimdall-injection-guard) | binary(injection_guard)"
+slow-timeout = { period = "180s", terminate-after = 1 }

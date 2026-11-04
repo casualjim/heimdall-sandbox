@@ -1,8 +1,10 @@
 [workspace]
 members = [
     "crates/heimdall-core",
+    "crates/heimdall-injection-guard",
     "crates/heimdall-linux-sandbox",
     "crates/heimdall-macos-sandbox",
+    "crates/heimdall-model-runtime",
     "crates/heimdall-privacy-filter",
     "crates/heimdall-process-hardening",
     "crates/heimdall-sandbox",
@@ -30,8 +32,10 @@ tag-message = "chore: release version {{version}}"
 clap = { version = "4.5.51", features = ["derive"] }
 dirs = "6"
 heimdall-core = { version = "0.2.6", path = "crates/heimdall-core" }
+heimdall-injection-guard = { version = "0.2.6", path = "crates/heimdall-injection-guard" }
 heimdall-linux-sandbox = { version = "0.2.6", path = "crates/heimdall-linux-sandbox" }
 heimdall-macos-sandbox = { version = "0.2.6", path = "crates/heimdall-macos-sandbox" }
+heimdall-model-runtime = { version = "0.2.6", path = "crates/heimdall-model-runtime" }
 heimdall-privacy-filter = { version = "0.2.6", path = "crates/heimdall-privacy-filter" }
 heimdall-process-hardening = { version = "0.2.6", path = "crates/heimdall-process-hardening" }
 heimdall-sandbox-policy = { version = "0.2.6", path = "crates/heimdall-sandbox-policy" }
