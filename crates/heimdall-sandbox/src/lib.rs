@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use heimdall_core::{Executor, SANDBOX_MISCONFIGURATION_EXIT_CODE};
 
 use commands::exec::ExecArgs;
+use commands::injection_guard::InjectionGuardArgs;
 use commands::inner_exec::InnerExecArgs;
 use commands::policy::PolicyArgs;
 use commands::privacy_filter::PrivacyFilterArgs;
@@ -45,6 +46,9 @@ enum Commands {
     /// Privacy-filter model download and text redaction.
     #[command(name = "privacy-filter")]
     PrivacyFilter(PrivacyFilterArgs),
+    /// Prompt-injection model download and text scanning.
+    #[command(name = "injection-guard")]
+    InjectionGuard(InjectionGuardArgs),
 }
 
 impl Cli {
@@ -64,9 +68,11 @@ impl Cli {
                 "policy commands do not create execution requests",
             )),
             Commands::InnerExec(args) => policy::inner_exec_args_to_request(args),
-            Commands::Setup(_) | Commands::PrivacyFilter(_) => Err(Error::arguments(
-                "setup/privacy-filter commands do not create execution requests",
-            )),
+            Commands::Setup(_) | Commands::PrivacyFilter(_) | Commands::InjectionGuard(_) => {
+                Err(Error::arguments(
+                    "setup/privacy-filter/injection-guard commands do not create execution requests",
+                ))
+            }
         }
     }
 }
@@ -117,6 +123,10 @@ fn run_cli(cli: Cli) -> i32 {
 
     if let Commands::PrivacyFilter(args) = command {
         return commands::privacy_filter::run_privacy_filter_command(args);
+    }
+
+    if let Commands::InjectionGuard(args) = command {
+        return commands::injection_guard::run_injection_guard_command(args);
     }
 
     // The Linux re-entry applies the planned Landlock read-grant universe in this

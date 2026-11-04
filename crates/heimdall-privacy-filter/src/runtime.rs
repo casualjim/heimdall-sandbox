@@ -1,25 +1,25 @@
-use std::path::{Path, PathBuf};
-
-use hf_hub::{Cache, Repo, RepoType};
+use heimdall_model_runtime::session::OnnxSession;
 use tokenizers::Tokenizer;
 
 use crate::input::{EncodedPrivacyInput, PrivacyTextInput};
 use crate::model::{
-    MODEL_REPOSITORY, ModelAssetPaths, PrivacyFilterConfig,
-    usable_token_limit_from_tokenizer_config_json,
+    ModelAssetPaths, PrivacyFilterConfig, usable_token_limit_from_tokenizer_config_json,
 };
 use crate::output::{
     PrivacyLabels, PrivacySpanOutput, ViterbiCalibration, decode_logits, merge_detected_spans,
 };
-use crate::session::PrivacyOnnxSession;
 use crate::{Error, Result};
+
+const LOGITS_OUTPUT: &str = "logits";
+const REQUIRED_INPUTS: [&str; 2] = ["attention_mask", "input_ids"];
 
 /// Cache-backed privacy-filter runtime used by redaction commands/tool integrations.
 pub struct PrivacyFilterRuntime {
     tokenizer: Tokenizer,
     labels: PrivacyLabels,
     calibration: ViterbiCalibration,
-    session: PrivacyOnnxSession,
+    session: OnnxSession,
+    logits_output: String,
     usable_token_limit: usize,
 }
 
@@ -30,7 +30,10 @@ impl PrivacyFilterRuntime {
             return Err(Error::Disabled);
         }
 
-        let assets = cached_asset_paths(&config)?;
+        let snapshot = config
+            .model_source()
+            .cached(&config.variant().required_files())?;
+        let assets = ModelAssetPaths::from_snapshot(snapshot.root(), config.variant());
         let config_json = std::fs::read_to_string(&assets.config)?;
         let labels = PrivacyLabels::from_config_json(&config_json)?;
         let calibration =
@@ -39,13 +42,16 @@ impl PrivacyFilterRuntime {
         let usable_token_limit = usable_token_limit_from_tokenizer_config_json(
             &std::fs::read_to_string(&assets.tokenizer_config)?,
         )?;
-        let session = PrivacyOnnxSession::load(&assets.onnx, &config)?;
+        let session = OnnxSession::load(&assets.onnx, config.execution_provider())?;
+        session.require_inputs(&REQUIRED_INPUTS)?;
+        let logits_output = logits_output_name(&session)?;
 
         Ok(Self {
             tokenizer,
             labels,
             calibration,
             session,
+            logits_output,
             usable_token_limit,
         })
     }
@@ -70,55 +76,29 @@ impl PrivacyFilterRuntime {
             self.usable_token_limit,
         )?;
         let context = encoded.context.clone();
-        let logits = self.session.run(&encoded)?;
+        let logits = self.session.run(
+            &encoded.input_ids,
+            &encoded.attention_mask,
+            &self.logits_output,
+        )?;
         let mut output = decode_logits(logits, context, &self.labels, self.calibration)?;
         output.spans = merge_detected_spans(output.spans);
         Ok(output)
     }
 }
 
-fn cached_asset_paths(config: &PrivacyFilterConfig) -> Result<ModelAssetPaths> {
-    let cache = match config.cache_dir() {
-        Some(cache_dir) => Cache::new(cache_dir.to_path_buf()),
-        None => Cache::from_env(),
-    };
-    let repo = Repo::with_revision(
-        MODEL_REPOSITORY.to_string(),
-        RepoType::Model,
-        config.revision().to_string(),
-    );
-    let repo = cache.repo(repo);
-    let config_path = repo
-        .get("config.json")
-        .ok_or_else(|| missing_cache_error(config, "config.json"))?;
-    let snapshot_root = snapshot_root_for(&config_path, "config.json")?;
-    Ok(ModelAssetPaths::from_snapshot(
-        snapshot_root,
-        config.variant(),
-    ))
-}
-
-fn missing_cache_error(config: &PrivacyFilterConfig, file: &str) -> Error {
-    Error::NotReady {
-        asset: file.to_string(),
-        repository: MODEL_REPOSITORY.to_string(),
-        revision: config.revision().to_string(),
+/// Pick `logits`, or the model's only output when it is not named `logits`.
+fn logits_output_name(session: &OnnxSession) -> Result<String> {
+    let outputs = session.output_names();
+    match outputs.as_slice() {
+        _ if outputs.contains(&LOGITS_OUTPUT) => Ok(LOGITS_OUTPUT.to_string()),
+        [only] => Ok((*only).to_string()),
+        _ => Err(Error::Schema {
+            detail: format!(
+                "expected output `logits` or a single output tensor, found {outputs:?}"
+            ),
+        }),
     }
-}
-
-fn snapshot_root_for(downloaded_file: &Path, repo_relative: &str) -> Result<PathBuf> {
-    let mut root = downloaded_file.to_path_buf();
-    for _ in Path::new(repo_relative).components() {
-        root.pop();
-    }
-    if root.as_os_str().is_empty() {
-        return Err(Error::NotReady {
-            asset: downloaded_file.display().to_string(),
-            repository: MODEL_REPOSITORY.to_string(),
-            revision: String::new(),
-        });
-    }
-    Ok(root)
 }
 
 #[cfg(test)]

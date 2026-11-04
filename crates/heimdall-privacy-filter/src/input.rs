@@ -1,9 +1,8 @@
+use heimdall_model_runtime::windows::plan_token_windows;
 use ndarray::{Array, Array2, ArrayView};
 use tokenizers::Tokenizer;
 
 use crate::{Error, Result};
-
-const DEFAULT_WINDOW_OVERLAP_TOKENS: usize = 256;
 
 impl From<ndarray::ShapeError> for Error {
     fn from(error: ndarray::ShapeError) -> Self {
@@ -40,73 +39,6 @@ impl PrivacyTextInput {
     pub fn texts(&self) -> &[String] {
         &self.texts
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TokenWindow {
-    source_sequence: usize,
-    start: usize,
-    end: usize,
-}
-
-impl TokenWindow {
-    const fn new(source_sequence: usize, start: usize, end: usize) -> Self {
-        Self {
-            source_sequence,
-            start,
-            end,
-        }
-    }
-}
-
-pub(crate) fn plan_token_windows(
-    lengths: &[usize],
-    usable_token_limit: usize,
-) -> Result<Vec<TokenWindow>> {
-    if usable_token_limit == 0 {
-        return Err(Error::InvalidAsset {
-            detail: "privacy filter usable token limit must be greater than zero".to_string(),
-        });
-    }
-    let overlap = window_overlap(usable_token_limit)?;
-    let mut windows = Vec::new();
-
-    for (source_sequence, length) in lengths.iter().copied().enumerate() {
-        if length <= usable_token_limit {
-            windows.push(TokenWindow::new(source_sequence, 0, length));
-            continue;
-        }
-
-        let mut start = 0;
-        while start < length {
-            let end = (start + usable_token_limit).min(length);
-            windows.push(TokenWindow::new(source_sequence, start, end));
-            if end == length {
-                break;
-            }
-            let next_start = end - overlap;
-            if next_start <= start {
-                return Err(Error::InvalidAsset {
-                    detail: "privacy filter token window plan cannot make forward progress"
-                        .to_string(),
-                });
-            }
-            start = next_start;
-        }
-    }
-
-    Ok(windows)
-}
-
-fn window_overlap(usable_token_limit: usize) -> Result<usize> {
-    if usable_token_limit < 3 {
-        return Err(Error::InvalidAsset {
-            detail: format!(
-                "privacy filter usable token limit {usable_token_limit} is too small for overlapping windows"
-            ),
-        });
-    }
-    Ok(DEFAULT_WINDOW_OVERLAP_TOKENS.min((usable_token_limit - 1) / 2))
 }
 
 /// Token context preserved from preprocessing through output decoding.
@@ -223,14 +155,16 @@ impl EncodedPrivacyInput {
         let mut max_len = 0;
 
         for window in windows {
-            let ids = full_rows[window.source_sequence][window.start..window.end].to_vec();
-            let attention = full_masks[window.source_sequence][window.start..window.end].to_vec();
-            let offsets = full_offsets[window.source_sequence][window.start..window.end].to_vec();
+            let source = window.source_sequence();
+            let range = window.start()..window.end();
+            let ids = full_rows[source][range.clone()].to_vec();
+            let attention = full_masks[source][range.clone()].to_vec();
+            let offsets = full_offsets[source][range].to_vec();
             max_len = max_len.max(ids.len());
             rows.push(ids);
             masks.push(attention);
             token_offsets.push(offsets);
-            source_sequences.push(window.source_sequence);
+            source_sequences.push(source);
         }
 
         let mut input_ids = Array::zeros((0, max_len));
@@ -294,39 +228,6 @@ mod tests {
     fn byte_span_rejects_out_of_range_token() {
         let ctx = PrivacyContext::new_test(vec!["a".to_string()], vec![vec![(0, 1)]]);
         assert!(ctx.byte_span(0, 0, 99).is_err());
-    }
-
-    #[test]
-    fn planner_keeps_single_window_input_unchanged() {
-        let windows = plan_token_windows(&[5], 8).unwrap();
-        assert_eq!(windows, vec![TokenWindow::new(0, 0, 5)]);
-    }
-
-    #[test]
-    fn planner_covers_overflow_with_forward_progress() {
-        let windows = plan_token_windows(&[20], 8).unwrap();
-        assert_eq!(windows.first().unwrap().start, 0);
-        assert_eq!(windows.last().unwrap().end, 20);
-        for pair in windows.windows(2) {
-            assert!(pair[1].start > pair[0].start);
-            assert!(pair[0].end > pair[1].start);
-            assert!(pair[1].start <= pair[0].end);
-        }
-        for token in 0..20 {
-            assert!(
-                windows
-                    .iter()
-                    .any(|window| token >= window.start && token < window.end),
-                "token {token} not covered"
-            );
-        }
-    }
-
-    #[test]
-    fn planner_rejects_unusable_limit() {
-        assert!(plan_token_windows(&[3], 0).is_err());
-        assert!(plan_token_windows(&[3], 1).is_err());
-        assert!(plan_token_windows(&[3], 2).is_err());
     }
 
     // --- real tokenizer ---

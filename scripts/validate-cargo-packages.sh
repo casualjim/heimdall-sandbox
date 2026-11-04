@@ -7,6 +7,8 @@ CRATES=(
   "heimdall-linux-sandbox"
   "heimdall-macos-sandbox"
   "heimdall-core"
+  "heimdall-model-runtime"
+  "heimdall-injection-guard"
   "heimdall-privacy-filter"
   "heimdall-sandbox"
 )

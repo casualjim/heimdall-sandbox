@@ -1,0 +1,17 @@
+[package]
+description = "Prompt-injection detection and redaction for Heimdall, built on the shared ONNX model runtime."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "heimdall-injection-guard"
+readme.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+heimdall-model-runtime.workspace = true
+ndarray.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true

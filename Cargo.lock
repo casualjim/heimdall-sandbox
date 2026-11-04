@@ -750,6 +750,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "heimdall-injection-guard"
+version = "0.2.6"
+dependencies = [
+ "heimdall-model-runtime",
+ "ndarray",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokenizers",
+]
+
+[[package]]
 name = "heimdall-linux-sandbox"
 version = "0.2.6"
 dependencies = [
@@ -769,15 +781,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "heimdall-privacy-filter"
+name = "heimdall-model-runtime"
 version = "0.2.6"
 dependencies = [
  "hf-hub",
  "ndarray",
  "ort",
  "serde",
- "serde_json",
  "small_ctor",
+ "thiserror",
+]
+
+[[package]]
+name = "heimdall-privacy-filter"
+version = "0.2.6"
+dependencies = [
+ "heimdall-model-runtime",
+ "ndarray",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokenizers",
 ]
@@ -795,6 +817,8 @@ version = "0.2.6"
 dependencies = [
  "clap",
  "heimdall-core",
+ "heimdall-injection-guard",
+ "heimdall-model-runtime",
  "heimdall-privacy-filter",
  "heimdall-process-hardening",
  "schemars",

@@ -1,10 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use hf_hub::api::sync::ApiBuilder;
-use hf_hub::{Repo, RepoType};
-
-use crate::model::{MODEL_REPOSITORY, PrivacyFilterConfig};
-use crate::{Error, Result};
+use crate::Result;
+use crate::model::PrivacyFilterConfig;
 
 /// Request for explicit privacy-filter setup.
 #[derive(Clone, Debug)]
@@ -44,65 +41,15 @@ pub struct SetupReport {
 
 /// Download privacy-filter model assets into the Hugging Face cache.
 pub fn setup_privacy_filter(request: SetupRequest) -> Result<SetupReport> {
-    let api = build_api(&request.config)?;
-    let repo = Repo::with_revision(
-        MODEL_REPOSITORY.to_string(),
-        RepoType::Model,
-        request.config.revision().to_string(),
-    );
-    let repo = api.repo(repo);
-
-    let mut downloaded_files = Vec::new();
-    for file in request.config.variant().required_files() {
-        let path = if request.force {
-            repo.download(file)
-        } else {
-            repo.get(file)
-        }
-        .map_err(|error| Error::Setup {
-            message: format!("failed to download {file}: {error}"),
-        })?;
-        downloaded_files.push(path);
-    }
-
-    let config_path = downloaded_files
-        .iter()
-        .find(|path| path.file_name().is_some_and(|name| name == "config.json"))
-        .ok_or_else(|| Error::Setup {
-            message: "config.json was not downloaded".to_string(),
-        })?;
-    let snapshot_root = snapshot_root_for(config_path, "config.json")?;
-
+    let files = request.config.variant().required_files();
+    let snapshot = request
+        .config
+        .model_source()
+        .download(&files, request.force)?;
     Ok(SetupReport {
-        snapshot_root,
-        downloaded_files,
+        snapshot_root: snapshot.root().to_path_buf(),
+        downloaded_files: snapshot.files().to_vec(),
     })
-}
-
-fn build_api(config: &PrivacyFilterConfig) -> Result<hf_hub::api::sync::Api> {
-    let mut builder = ApiBuilder::from_env().with_progress(true);
-    if let Some(cache_dir) = config.cache_dir() {
-        builder = builder.with_cache_dir(cache_dir.to_path_buf());
-    }
-    builder.build().map_err(|error| Error::Setup {
-        message: format!("failed to initialize Hugging Face API: {error}"),
-    })
-}
-
-fn snapshot_root_for(downloaded_file: &Path, repo_relative: &str) -> Result<PathBuf> {
-    let mut root = downloaded_file.to_path_buf();
-    for _ in Path::new(repo_relative).components() {
-        root.pop();
-    }
-    if root.as_os_str().is_empty() {
-        return Err(Error::Setup {
-            message: format!(
-                "failed to derive snapshot root from {}",
-                downloaded_file.display()
-            ),
-        });
-    }
-    Ok(root)
 }
 
 #[cfg(test)]

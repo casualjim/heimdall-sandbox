@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use heimdall_model_runtime::session::ExecutionProvider;
+use heimdall_model_runtime::source::ModelSource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -77,17 +79,6 @@ impl PrivacyFilterVariant {
     }
 }
 
-/// ONNX Runtime execution provider selection for privacy-filter inference.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PrivacyExecutionProvider {
-    /// CPU execution provider. This is the default and most portable path.
-    #[default]
-    Cpu,
-    /// WebGPU execution provider. Must be explicitly selected.
-    WebGpu,
-}
-
 /// User-facing runtime/setup configuration for privacy filtering.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +87,7 @@ pub struct PrivacyFilterConfig {
     variant: PrivacyFilterVariant,
     revision: String,
     cache_dir: Option<PathBuf>,
-    execution_provider: PrivacyExecutionProvider,
+    execution_provider: ExecutionProvider,
 }
 
 impl PrivacyFilterConfig {
@@ -108,7 +99,7 @@ impl PrivacyFilterConfig {
             variant: PrivacyFilterVariant::default(),
             revision: DEFAULT_MODEL_REVISION.to_string(),
             cache_dir: None,
-            execution_provider: PrivacyExecutionProvider::default(),
+            execution_provider: ExecutionProvider::default(),
         }
     }
 
@@ -145,9 +136,15 @@ impl PrivacyFilterConfig {
         self.cache_dir.as_deref()
     }
 
+    /// Return the Hugging Face source for the configured revision and cache directory.
+    #[must_use]
+    pub(crate) fn model_source(&self) -> ModelSource {
+        ModelSource::new(MODEL_REPOSITORY, &self.revision, self.cache_dir.clone())
+    }
+
     /// Return the selected execution provider.
     #[must_use]
-    pub const fn execution_provider(&self) -> PrivacyExecutionProvider {
+    pub const fn execution_provider(&self) -> ExecutionProvider {
         self.execution_provider
     }
 
@@ -174,7 +171,7 @@ impl PrivacyFilterConfig {
 
     /// Return a copy with the selected execution provider.
     #[must_use]
-    pub const fn with_execution_provider(mut self, provider: PrivacyExecutionProvider) -> Self {
+    pub const fn with_execution_provider(mut self, provider: ExecutionProvider) -> Self {
         self.execution_provider = provider;
         self
     }
@@ -320,11 +317,11 @@ mod tests {
             .with_variant(PrivacyFilterVariant::Fp16)
             .with_revision("deadbeef")
             .with_cache_dir("/tmp/x")
-            .with_execution_provider(PrivacyExecutionProvider::WebGpu);
+            .with_execution_provider(ExecutionProvider::WebGpu);
         assert_eq!(c.variant(), PrivacyFilterVariant::Fp16);
         assert_eq!(c.revision(), "deadbeef");
         assert_eq!(c.cache_dir().unwrap().to_string_lossy(), "/tmp/x");
-        assert_eq!(c.execution_provider(), PrivacyExecutionProvider::WebGpu);
+        assert_eq!(c.execution_provider(), ExecutionProvider::WebGpu);
     }
 
     #[test]

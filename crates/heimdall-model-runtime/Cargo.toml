@@ -1,0 +1,20 @@
+[package]
+description = "Shared ONNX Runtime session, Hugging Face model source, and token window planning for Heimdall models."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "heimdall-model-runtime"
+readme.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[target.'cfg(not(all(target_os = "linux", target_arch = "aarch64")))'.dependencies]
+ort = { workspace = true, features = ["webgpu"] }
+
+[dependencies]
+hf-hub.workspace = true
+ndarray.workspace = true
+ort.workspace = true
+serde.workspace = true
+small_ctor.workspace = true
+thiserror.workspace = true

@@ -11,6 +11,8 @@ version.workspace = true
 [dependencies]
 clap.workspace = true
 heimdall-core.workspace = true
+heimdall-injection-guard.workspace = true
+heimdall-model-runtime.workspace = true
 heimdall-privacy-filter.workspace = true
 heimdall-process-hardening.workspace = true
 schemars.workspace = true

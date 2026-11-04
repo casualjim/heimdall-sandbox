@@ -1,6 +1,7 @@
 //! Shared CLI-facing type mirrors for privacy-filter domain types.
 
-use heimdall_privacy_filter::{PrivacyExecutionProvider, PrivacyFilterVariant};
+use heimdall_model_runtime::session::ExecutionProvider;
+use heimdall_privacy_filter::PrivacyFilterVariant;
 
 /// CLI-facing variant mirror for [`PrivacyFilterVariant`].
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -29,7 +30,7 @@ impl From<CliPrivacyVariant> for PrivacyFilterVariant {
     }
 }
 
-/// CLI-facing execution provider mirror for [`PrivacyExecutionProvider`].
+/// CLI-facing execution provider mirror for [`ExecutionProvider`].
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum CliExecutionProvider {
     /// CPU execution provider (default).
@@ -38,7 +39,7 @@ pub enum CliExecutionProvider {
     WebGpu,
 }
 
-impl From<CliExecutionProvider> for PrivacyExecutionProvider {
+impl From<CliExecutionProvider> for ExecutionProvider {
     fn from(provider: CliExecutionProvider) -> Self {
         match provider {
             CliExecutionProvider::Cpu => Self::Cpu,
