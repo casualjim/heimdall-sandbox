@@ -1,8 +1,18 @@
+## [0.3.0] - 2026-11-04
+
+### 🚀 Features
+
+- Add prompt-injection guard on shared model runtime (#27)
 ## [0.2.6] - 2026-09-07
 
 ### 🐛 Bug Fixes
 
 - *(sandbox)* Stop readonly rebind from shadowing writable negated deny (#26)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.6 [ci skip]
+- Release version 0.2.6
 ## [0.2.5] - 2026-08-29
 
 ### 🐛 Bug Fixes
